@@ -37,33 +37,53 @@ host_triplet = @host@
 target_triplet = @target@
 DIST_COMMON = $(srcdir)/Makefile.am $(srcdir)/Makefile.in \
 	$(top_srcdir)/config/Rules.am
-bin_PROGRAMS = zvol_id$(EXEEXT)
+udev_PROGRAMS = zvol_id$(EXEEXT)
 subdir = cmd/zvol_id
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps =  \
+	$(top_srcdir)/config/always-no-unused-but-set-variable.m4 \
+	$(top_srcdir)/config/kernel-automount.m4 \
 	$(top_srcdir)/config/kernel-bdev-block-device-operations.m4 \
 	$(top_srcdir)/config/kernel-bdev-logical-size.m4 \
+	$(top_srcdir)/config/kernel-bdi-setup-and-register.m4 \
+	$(top_srcdir)/config/kernel-bdi.m4 \
 	$(top_srcdir)/config/kernel-bio-empty-barrier.m4 \
 	$(top_srcdir)/config/kernel-bio-end-io-t-args.m4 \
 	$(top_srcdir)/config/kernel-bio-failfast.m4 \
 	$(top_srcdir)/config/kernel-bio-rw-syncio.m4 \
 	$(top_srcdir)/config/kernel-blk-end-request.m4 \
 	$(top_srcdir)/config/kernel-blk-fetch-request.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-discard.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-flush.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-io-opt.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-max-hw-sectors.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-max-segments.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-nonrot.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-physical-block-size.m4 \
 	$(top_srcdir)/config/kernel-blk-requeue-request.m4 \
 	$(top_srcdir)/config/kernel-blk-rq-bytes.m4 \
 	$(top_srcdir)/config/kernel-blk-rq-pos.m4 \
 	$(top_srcdir)/config/kernel-blk-rq-sectors.m4 \
 	$(top_srcdir)/config/kernel-blkdev-get-by-path.m4 \
+	$(top_srcdir)/config/kernel-check-disk-size-change.m4 \
+	$(top_srcdir)/config/kernel-d-obtain-alias.m4 \
 	$(top_srcdir)/config/kernel-evict-inode.m4 \
+	$(top_srcdir)/config/kernel-fallocate.m4 \
 	$(top_srcdir)/config/kernel-fmode-t.m4 \
 	$(top_srcdir)/config/kernel-fsync.m4 \
 	$(top_srcdir)/config/kernel-get-disk-ro.m4 \
 	$(top_srcdir)/config/kernel-insert-inode-locked.m4 \
 	$(top_srcdir)/config/kernel-invalidate-bdev-args.m4 \
 	$(top_srcdir)/config/kernel-kobj-name-len.m4 \
+	$(top_srcdir)/config/kernel-mount-nodev.m4 \
 	$(top_srcdir)/config/kernel-open-bdev-exclusive.m4 \
 	$(top_srcdir)/config/kernel-rq-for-each_segment.m4 \
 	$(top_srcdir)/config/kernel-rq-is_sync.m4 \
+	$(top_srcdir)/config/kernel-security-inode-init.m4 \
+	$(top_srcdir)/config/kernel-set-nlink.m4 \
+	$(top_srcdir)/config/kernel-show-options.m4 \
+	$(top_srcdir)/config/kernel-shrink.m4 \
+	$(top_srcdir)/config/kernel-truncate-setsize.m4 \
 	$(top_srcdir)/config/kernel-xattr-handler.m4 \
 	$(top_srcdir)/config/kernel.m4 \
 	$(top_srcdir)/config/user-arch.m4 \
@@ -73,6 +93,7 @@ am__aclocal_m4_deps =  \
 	$(top_srcdir)/config/user-libuuid.m4 \
 	$(top_srcdir)/config/user-nptl_guard_within_stack.m4 \
 	$(top_srcdir)/config/user-selinux.m4 \
+	$(top_srcdir)/config/user-udev.m4 \
 	$(top_srcdir)/config/user-zlib.m4 $(top_srcdir)/config/user.m4 \
 	$(top_srcdir)/config/zfs-build.m4 \
 	$(top_srcdir)/config/zfs-meta.m4 $(top_srcdir)/configure.ac
@@ -82,8 +103,8 @@ mkinstalldirs = $(install_sh) -d
 CONFIG_HEADER = $(top_builddir)/zfs_config.h
 CONFIG_CLEAN_FILES =
 CONFIG_CLEAN_VPATH_FILES =
-am__installdirs = "$(DESTDIR)$(bindir)"
-PROGRAMS = $(bin_PROGRAMS)
+am__installdirs = "$(DESTDIR)$(udevdir)"
+PROGRAMS = $(udev_PROGRAMS)
 am_zvol_id_OBJECTS = zvol_id_main.$(OBJEXT)
 zvol_id_OBJECTS = $(am_zvol_id_OBJECTS)
 zvol_id_LDADD = $(LDADD)
@@ -140,7 +161,10 @@ CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
 DEBUG_CFLAGS = @DEBUG_CFLAGS@
+DEBUG_DMU_TX = @DEBUG_DMU_TX@
 DEBUG_STACKFLAGS = @DEBUG_STACKFLAGS@
+DEBUG_ZFS = @DEBUG_ZFS@
+DEFAULT_INIT_DIR = @DEFAULT_INIT_DIR@
 DEFAULT_INIT_SCRIPT = @DEFAULT_INIT_SCRIPT@
 DEFAULT_PACKAGE = @DEFAULT_PACKAGE@
 DEFS = @DEFS@
@@ -162,6 +186,8 @@ GREP = @GREP@
 HAVE_ALIEN = @HAVE_ALIEN@
 HAVE_DPKG = @HAVE_DPKG@
 HAVE_DPKGBUILD = @HAVE_DPKGBUILD@
+HAVE_MAKEPKG = @HAVE_MAKEPKG@
+HAVE_PACMAN = @HAVE_PACMAN@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
 INSTALL = @INSTALL@
@@ -188,9 +214,12 @@ LN_S = @LN_S@
 LTLIBOBJS = @LTLIBOBJS@
 MAINT = @MAINT@
 MAKEINFO = @MAKEINFO@
+MAKEPKG = @MAKEPKG@
+MAKEPKG_VERSION = @MAKEPKG_VERSION@
 MKDIR_P = @MKDIR_P@
 NM = @NM@
 NMEDIT = @NMEDIT@
+NO_UNUSED_BUT_SET_VARIABLE = @NO_UNUSED_BUT_SET_VARIABLE@
 OBJDUMP = @OBJDUMP@
 OBJEXT = @OBJEXT@
 OTOOL = @OTOOL@
@@ -201,6 +230,8 @@ PACKAGE_NAME = @PACKAGE_NAME@
 PACKAGE_STRING = @PACKAGE_STRING@
 PACKAGE_TARNAME = @PACKAGE_TARNAME@
 PACKAGE_VERSION = @PACKAGE_VERSION@
+PACMAN = @PACMAN@
+PACMAN_VERSION = @PACMAN_VERSION@
 PATH_SEPARATOR = @PATH_SEPARATOR@
 RANLIB = @RANLIB@
 RPM = @RPM@
@@ -286,11 +317,13 @@ target_vendor = @target_vendor@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
+udevdir = @udevdir@
+udevruledir = @udevruledir@
 DEFAULT_INCLUDES = -include ${top_builddir}/zfs_config.h \
 	-I$(top_srcdir)/include -I$(top_srcdir)/lib/libspl/include
 AM_LIBTOOLFLAGS = --silent
 AM_CFLAGS = -Wall -Wstrict-prototypes -fno-strict-aliasing \
-	-Wno-unused-but-set-variable ${DEBUG_CFLAGS} -D_GNU_SOURCE \
+	${NO_UNUSED_BUT_SET_VARIABLE} ${DEBUG_CFLAGS} -D_GNU_SOURCE \
 	-D__EXTENSIONS__ -D_REENTRANT -D_POSIX_PTHREAD_SEMANTICS \
 	-D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE \
 	-DTEXT_DOMAIN=\"zfs-linux-user\"
@@ -331,10 +364,10 @@ $(top_srcdir)/configure: @MAINTAINER_MODE_TRUE@ $(am__configure_deps)
 $(ACLOCAL_M4): @MAINTAINER_MODE_TRUE@ $(am__aclocal_m4_deps)
 	cd $(top_builddir) && $(MAKE) $(AM_MAKEFLAGS) am--refresh
 $(am__aclocal_m4_deps):
-install-binPROGRAMS: $(bin_PROGRAMS)
+install-udevPROGRAMS: $(udev_PROGRAMS)
 	@$(NORMAL_INSTALL)
-	test -z "$(bindir)" || $(MKDIR_P) "$(DESTDIR)$(bindir)"
-	@list='$(bin_PROGRAMS)'; test -n "$(bindir)" || list=; \
+	test -z "$(udevdir)" || $(MKDIR_P) "$(DESTDIR)$(udevdir)"
+	@list='$(udev_PROGRAMS)'; test -n "$(udevdir)" || list=; \
 	for p in $$list; do echo "$$p $$p"; done | \
 	sed 's/$(EXEEXT)$$//' | \
 	while read p p1; do if test -f $$p || test -f $$p1; \
@@ -351,23 +384,23 @@ install-binPROGRAMS: $(bin_PROGRAMS)
 	while read type dir files; do \
 	    if test "$$dir" = .; then dir=; else dir=/$$dir; fi; \
 	    test -z "$$files" || { \
-	    echo " $(INSTALL_PROGRAM_ENV) $(LIBTOOL) $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=install $(INSTALL_PROGRAM) $$files '$(DESTDIR)$(bindir)$$dir'"; \
-	    $(INSTALL_PROGRAM_ENV) $(LIBTOOL) $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=install $(INSTALL_PROGRAM) $$files "$(DESTDIR)$(bindir)$$dir" || exit $$?; \
+	    echo " $(INSTALL_PROGRAM_ENV) $(LIBTOOL) $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=install $(INSTALL_PROGRAM) $$files '$(DESTDIR)$(udevdir)$$dir'"; \
+	    $(INSTALL_PROGRAM_ENV) $(LIBTOOL) $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=install $(INSTALL_PROGRAM) $$files "$(DESTDIR)$(udevdir)$$dir" || exit $$?; \
 	    } \
 	; done
 
-uninstall-binPROGRAMS:
+uninstall-udevPROGRAMS:
 	@$(NORMAL_UNINSTALL)
-	@list='$(bin_PROGRAMS)'; test -n "$(bindir)" || list=; \
+	@list='$(udev_PROGRAMS)'; test -n "$(udevdir)" || list=; \
 	files=`for p in $$list; do echo "$$p"; done | \
 	  sed -e 'h;s,^.*/,,;s/$(EXEEXT)$$//;$(transform)' \
 	      -e 's/$$/$(EXEEXT)/' `; \
 	test -n "$$list" || exit 0; \
-	echo " ( cd '$(DESTDIR)$(bindir)' && rm -f" $$files ")"; \
-	cd "$(DESTDIR)$(bindir)" && rm -f $$files
+	echo " ( cd '$(DESTDIR)$(udevdir)' && rm -f" $$files ")"; \
+	cd "$(DESTDIR)$(udevdir)" && rm -f $$files
 
-clean-binPROGRAMS:
-	@list='$(bin_PROGRAMS)'; test -n "$$list" || exit 0; \
+clean-udevPROGRAMS:
+	@list='$(udev_PROGRAMS)'; test -n "$$list" || exit 0; \
 	echo " rm -f" $$list; \
 	rm -f $$list || exit $$?; \
 	test -n "$(EXEEXT)" || exit 0; \
@@ -518,7 +551,7 @@ check-am: all-am
 check: check-am
 all-am: Makefile $(PROGRAMS)
 installdirs:
-	for dir in "$(DESTDIR)$(bindir)"; do \
+	for dir in "$(DESTDIR)$(udevdir)"; do \
 	  test -z "$$dir" || $(MKDIR_P) "$$dir"; \
 	done
 install: install-am
@@ -548,7 +581,8 @@ maintainer-clean-generic:
 	@echo "it deletes files that may require special tools to rebuild."
 clean: clean-am
 
-clean-am: clean-binPROGRAMS clean-generic clean-libtool mostlyclean-am
+clean-am: clean-generic clean-libtool clean-udevPROGRAMS \
+	mostlyclean-am
 
 distclean: distclean-am
 	-rm -rf ./$(DEPDIR)
@@ -568,13 +602,13 @@ info: info-am
 
 info-am:
 
-install-data-am:
+install-data-am: install-udevPROGRAMS
 
 install-dvi: install-dvi-am
 
 install-dvi-am:
 
-install-exec-am: install-binPROGRAMS
+install-exec-am:
 
 install-html: install-html-am
 
@@ -614,23 +648,23 @@ ps: ps-am
 
 ps-am:
 
-uninstall-am: uninstall-binPROGRAMS
+uninstall-am: uninstall-udevPROGRAMS
 
 .MAKE: install-am install-strip
 
-.PHONY: CTAGS GTAGS all all-am check check-am clean clean-binPROGRAMS \
-	clean-generic clean-libtool ctags distclean distclean-compile \
-	distclean-generic distclean-libtool distclean-tags distdir dvi \
-	dvi-am html html-am info info-am install install-am \
-	install-binPROGRAMS install-data install-data-am install-dvi \
+.PHONY: CTAGS GTAGS all all-am check check-am clean clean-generic \
+	clean-libtool clean-udevPROGRAMS ctags distclean \
+	distclean-compile distclean-generic distclean-libtool \
+	distclean-tags distdir dvi dvi-am html html-am info info-am \
+	install install-am install-data install-data-am install-dvi \
 	install-dvi-am install-exec install-exec-am install-html \
 	install-html-am install-info install-info-am install-man \
 	install-pdf install-pdf-am install-ps install-ps-am \
-	install-strip installcheck installcheck-am installdirs \
-	maintainer-clean maintainer-clean-generic mostlyclean \
-	mostlyclean-compile mostlyclean-generic mostlyclean-libtool \
-	pdf pdf-am ps ps-am tags uninstall uninstall-am \
-	uninstall-binPROGRAMS
+	install-strip install-udevPROGRAMS installcheck \
+	installcheck-am installdirs maintainer-clean \
+	maintainer-clean-generic mostlyclean mostlyclean-compile \
+	mostlyclean-generic mostlyclean-libtool pdf pdf-am ps ps-am \
+	tags uninstall uninstall-am uninstall-udevPROGRAMS
 
 
 # Tell versions [3.59,3.63) of GNU make to not export all variables.

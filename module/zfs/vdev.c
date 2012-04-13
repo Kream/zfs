@@ -492,7 +492,7 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 		    &vd->vdev_removing);
 	}
 
-	if (parent && !parent->vdev_parent) {
+	if (parent && !parent->vdev_parent && alloctype != VDEV_ALLOC_ATTACH) {
 		ASSERT(alloctype == VDEV_ALLOC_LOAD ||
 		    alloctype == VDEV_ALLOC_ADD ||
 		    alloctype == VDEV_ALLOC_SPLIT ||
@@ -669,6 +669,8 @@ vdev_top_transfer(vdev_t *svd, vdev_t *tvd)
 	svd->vdev_ms_shift = 0;
 	svd->vdev_ms_count = 0;
 
+	if (tvd->vdev_mg)
+		ASSERT3P(tvd->vdev_mg, ==, svd->vdev_mg);
 	tvd->vdev_mg = svd->vdev_mg;
 	tvd->vdev_ms = svd->vdev_ms;
 
@@ -833,7 +835,7 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 
 	ASSERT(oldc <= newc);
 
-	mspp = kmem_zalloc(newc * sizeof (*mspp), KM_SLEEP);
+	mspp = kmem_zalloc(newc * sizeof (*mspp), KM_SLEEP | KM_NODEBUG);
 
 	if (oldc != 0) {
 		bcopy(vd->vdev_ms, mspp, oldc * sizeof (*mspp));
@@ -3053,13 +3055,17 @@ vdev_set_state(vdev_t *vd, boolean_t isopen, vdev_state_t state, vdev_aux_t aux)
 
 /*
  * Check the vdev configuration to ensure that it's capable of supporting
- * a root pool. Currently, we do not support RAID-Z or partial configuration.
- * In addition, only a single top-level vdev is allowed and none of the leaves
- * can be wholedisks.
+ * a root pool.
  */
 boolean_t
 vdev_is_bootable(vdev_t *vd)
 {
+#if defined(__sun__) || defined(__sun)
+	/*
+	 * Currently, we do not support RAID-Z or partial configuration.
+	 * In addition, only a single top-level vdev is allowed and none of the
+	 * leaves can be wholedisks.
+	 */
 	int c;
 
 	if (!vd->vdev_ops->vdev_op_leaf) {
@@ -3080,6 +3086,7 @@ vdev_is_bootable(vdev_t *vd)
 		if (!vdev_is_bootable(vd->vdev_child[c]))
 			return (B_FALSE);
 	}
+#endif /* __sun__ || __sun */
 	return (B_TRUE);
 }
 
@@ -3174,4 +3181,7 @@ EXPORT_SYMBOL(vdev_degrade);
 EXPORT_SYMBOL(vdev_online);
 EXPORT_SYMBOL(vdev_offline);
 EXPORT_SYMBOL(vdev_clear);
+
+module_param(zfs_scrub_limit, int, 0644);
+MODULE_PARM_DESC(zfs_scrub_limit, "Max scrub/resilver I/O per leaf vdev");
 #endif

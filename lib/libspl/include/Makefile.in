@@ -40,29 +40,49 @@ DIST_COMMON = $(libspl_HEADERS) $(srcdir)/Makefile.am \
 	$(srcdir)/Makefile.in
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps =  \
+	$(top_srcdir)/config/always-no-unused-but-set-variable.m4 \
+	$(top_srcdir)/config/kernel-automount.m4 \
 	$(top_srcdir)/config/kernel-bdev-block-device-operations.m4 \
 	$(top_srcdir)/config/kernel-bdev-logical-size.m4 \
+	$(top_srcdir)/config/kernel-bdi-setup-and-register.m4 \
+	$(top_srcdir)/config/kernel-bdi.m4 \
 	$(top_srcdir)/config/kernel-bio-empty-barrier.m4 \
 	$(top_srcdir)/config/kernel-bio-end-io-t-args.m4 \
 	$(top_srcdir)/config/kernel-bio-failfast.m4 \
 	$(top_srcdir)/config/kernel-bio-rw-syncio.m4 \
 	$(top_srcdir)/config/kernel-blk-end-request.m4 \
 	$(top_srcdir)/config/kernel-blk-fetch-request.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-discard.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-flush.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-io-opt.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-max-hw-sectors.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-max-segments.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-nonrot.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-physical-block-size.m4 \
 	$(top_srcdir)/config/kernel-blk-requeue-request.m4 \
 	$(top_srcdir)/config/kernel-blk-rq-bytes.m4 \
 	$(top_srcdir)/config/kernel-blk-rq-pos.m4 \
 	$(top_srcdir)/config/kernel-blk-rq-sectors.m4 \
 	$(top_srcdir)/config/kernel-blkdev-get-by-path.m4 \
+	$(top_srcdir)/config/kernel-check-disk-size-change.m4 \
+	$(top_srcdir)/config/kernel-d-obtain-alias.m4 \
 	$(top_srcdir)/config/kernel-evict-inode.m4 \
+	$(top_srcdir)/config/kernel-fallocate.m4 \
 	$(top_srcdir)/config/kernel-fmode-t.m4 \
 	$(top_srcdir)/config/kernel-fsync.m4 \
 	$(top_srcdir)/config/kernel-get-disk-ro.m4 \
 	$(top_srcdir)/config/kernel-insert-inode-locked.m4 \
 	$(top_srcdir)/config/kernel-invalidate-bdev-args.m4 \
 	$(top_srcdir)/config/kernel-kobj-name-len.m4 \
+	$(top_srcdir)/config/kernel-mount-nodev.m4 \
 	$(top_srcdir)/config/kernel-open-bdev-exclusive.m4 \
 	$(top_srcdir)/config/kernel-rq-for-each_segment.m4 \
 	$(top_srcdir)/config/kernel-rq-is_sync.m4 \
+	$(top_srcdir)/config/kernel-security-inode-init.m4 \
+	$(top_srcdir)/config/kernel-set-nlink.m4 \
+	$(top_srcdir)/config/kernel-show-options.m4 \
+	$(top_srcdir)/config/kernel-shrink.m4 \
+	$(top_srcdir)/config/kernel-truncate-setsize.m4 \
 	$(top_srcdir)/config/kernel-xattr-handler.m4 \
 	$(top_srcdir)/config/kernel.m4 \
 	$(top_srcdir)/config/user-arch.m4 \
@@ -72,6 +92,7 @@ am__aclocal_m4_deps =  \
 	$(top_srcdir)/config/user-libuuid.m4 \
 	$(top_srcdir)/config/user-nptl_guard_within_stack.m4 \
 	$(top_srcdir)/config/user-selinux.m4 \
+	$(top_srcdir)/config/user-udev.m4 \
 	$(top_srcdir)/config/user-zlib.m4 $(top_srcdir)/config/user.m4 \
 	$(top_srcdir)/config/zfs-build.m4 \
 	$(top_srcdir)/config/zfs-meta.m4 $(top_srcdir)/configure.ac
@@ -173,7 +194,10 @@ CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
 DEBUG_CFLAGS = @DEBUG_CFLAGS@
+DEBUG_DMU_TX = @DEBUG_DMU_TX@
 DEBUG_STACKFLAGS = @DEBUG_STACKFLAGS@
+DEBUG_ZFS = @DEBUG_ZFS@
+DEFAULT_INIT_DIR = @DEFAULT_INIT_DIR@
 DEFAULT_INIT_SCRIPT = @DEFAULT_INIT_SCRIPT@
 DEFAULT_PACKAGE = @DEFAULT_PACKAGE@
 DEFS = @DEFS@
@@ -195,6 +219,8 @@ GREP = @GREP@
 HAVE_ALIEN = @HAVE_ALIEN@
 HAVE_DPKG = @HAVE_DPKG@
 HAVE_DPKGBUILD = @HAVE_DPKGBUILD@
+HAVE_MAKEPKG = @HAVE_MAKEPKG@
+HAVE_PACMAN = @HAVE_PACMAN@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
 INSTALL = @INSTALL@
@@ -221,9 +247,12 @@ LN_S = @LN_S@
 LTLIBOBJS = @LTLIBOBJS@
 MAINT = @MAINT@
 MAKEINFO = @MAKEINFO@
+MAKEPKG = @MAKEPKG@
+MAKEPKG_VERSION = @MAKEPKG_VERSION@
 MKDIR_P = @MKDIR_P@
 NM = @NM@
 NMEDIT = @NMEDIT@
+NO_UNUSED_BUT_SET_VARIABLE = @NO_UNUSED_BUT_SET_VARIABLE@
 OBJDUMP = @OBJDUMP@
 OBJEXT = @OBJEXT@
 OTOOL = @OTOOL@
@@ -234,6 +263,8 @@ PACKAGE_NAME = @PACKAGE_NAME@
 PACKAGE_STRING = @PACKAGE_STRING@
 PACKAGE_TARNAME = @PACKAGE_TARNAME@
 PACKAGE_VERSION = @PACKAGE_VERSION@
+PACMAN = @PACMAN@
+PACMAN_VERSION = @PACMAN_VERSION@
 PATH_SEPARATOR = @PATH_SEPARATOR@
 RANLIB = @RANLIB@
 RPM = @RPM@
@@ -319,6 +350,8 @@ target_vendor = @target_vendor@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
+udevdir = @udevdir@
+udevruledir = @udevruledir@
 SUBDIRS = ia32 rpc sys util
 libspldir = $(includedir)/libspl
 libspl_HEADERS = \
@@ -327,6 +360,7 @@ libspl_HEADERS = \
 	$(top_srcdir)/lib/libspl/include/attr.h \
 	$(top_srcdir)/lib/libspl/include/devid.h \
 	$(top_srcdir)/lib/libspl/include/libdevinfo.h \
+	$(top_srcdir)/lib/libspl/include/libgen.h \
 	$(top_srcdir)/lib/libspl/include/libshare.h \
 	$(top_srcdir)/lib/libspl/include/limits.h \
 	$(top_srcdir)/lib/libspl/include/locale.h \

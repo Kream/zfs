@@ -488,7 +488,7 @@ zpool_do_add(int argc, char **argv)
 	}
 
 	/* pass off to get_vdev_spec for processing */
-	nvroot = make_root_vdev(zhp, force, !force, B_FALSE, dryrun,
+	nvroot = make_root_vdev(zhp, NULL, force, !force, B_FALSE, dryrun,
 	    argc, argv);
 	if (nvroot == NULL) {
 		zpool_close(zhp);
@@ -688,7 +688,7 @@ zpool_do_create(int argc, char **argv)
 	}
 
 	/* pass off to get_vdev_spec for bulk processing */
-	nvroot = make_root_vdev(NULL, force, !force, B_FALSE, dryrun,
+	nvroot = make_root_vdev(NULL, props, force, !force, B_FALSE, dryrun,
 	    argc - 1, argv + 1);
 	if (nvroot == NULL)
 		goto errout;
@@ -1482,7 +1482,7 @@ show_import(nvlist_t *config)
 	}
 
 	if (msgid != NULL)
-		(void) printf(gettext("   see: http://www.sun.com/msg/%s\n"),
+		(void) printf(gettext("   see: http://zfsonlinux.org/msg/%s\n"),
 		    msgid);
 
 	(void) printf(gettext("config:\n\n"));
@@ -1533,7 +1533,9 @@ do_import(nvlist_t *config, const char *newname, const char *mntopts,
 
 		if (nvlist_lookup_uint64(config, ZPOOL_CONFIG_HOSTID,
 		    &hostid) == 0) {
-			if ((unsigned long)hostid != gethostid()) {
+			unsigned long system_hostid = gethostid() & 0xffffffff;
+
+			if ((unsigned long)hostid != system_hostid) {
 				char *hostname;
 				uint64_t timestamp;
 				time_t t;
@@ -2173,11 +2175,30 @@ print_iostat(zpool_handle_t *zhp, void *data)
 	return (0);
 }
 
+static int
+get_columns(void)
+{
+	struct winsize ws;
+	int columns = 80;
+	int error;
+
+	if (isatty(STDOUT_FILENO)) {
+		error = ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
+		if (error == 0)
+			columns = ws.ws_col;
+	} else {
+		columns = 999;
+	}
+
+	return columns;
+}
+
 int
 get_namewidth(zpool_handle_t *zhp, void *data)
 {
 	iostat_cbdata_t *cb = data;
 	nvlist_t *config, *nvroot;
+	int columns;
 
 	if ((config = zpool_get_config(zhp, NULL)) != NULL) {
 		verify(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
@@ -2189,13 +2210,15 @@ get_namewidth(zpool_handle_t *zhp, void *data)
 	}
 
 	/*
-	 * The width must fall into the range [10,38].  The upper limit is the
-	 * maximum we can have and still fit in 80 columns.
+	 * The width must be at least 10, but may be as large as the
+	 * column width - 42 so that we can still fit in one line.
 	 */
+	columns = get_columns();
+
 	if (cb->cb_namewidth < 10)
 		cb->cb_namewidth = 10;
-	if (cb->cb_namewidth > 38)
-		cb->cb_namewidth = 38;
+	if (cb->cb_namewidth > columns - 42)
+		cb->cb_namewidth = columns - 42;
 
 	return (0);
 }
@@ -2356,42 +2379,48 @@ zpool_do_iostat(int argc, char **argv)
 		pool_list_update(list);
 
 		if ((npools = pool_list_count(list)) == 0)
-			break;
+			(void) fprintf(stderr, gettext("no pools available\n"));
+		else {
+			/*
+			 * Refresh all statistics.  This is done as an
+			 * explicit step before calculating the maximum name
+			 * width, so that any * configuration changes are
+			 * properly accounted for.
+			 */
+			(void) pool_list_iter(list, B_FALSE, refresh_iostat,
+				&cb);
 
-		/*
-		 * Refresh all statistics.  This is done as an explicit step
-		 * before calculating the maximum name width, so that any
-		 * configuration changes are properly accounted for.
-		 */
-		(void) pool_list_iter(list, B_FALSE, refresh_iostat, &cb);
+			/*
+			 * Iterate over all pools to determine the maximum width
+			 * for the pool / device name column across all pools.
+			 */
+			cb.cb_namewidth = 0;
+			(void) pool_list_iter(list, B_FALSE, get_namewidth,
+				&cb);
 
-		/*
-		 * Iterate over all pools to determine the maximum width
-		 * for the pool / device name column across all pools.
-		 */
-		cb.cb_namewidth = 0;
-		(void) pool_list_iter(list, B_FALSE, get_namewidth, &cb);
+			if (timestamp_fmt != NODATE)
+				print_timestamp(timestamp_fmt);
 
-		if (timestamp_fmt != NODATE)
-			print_timestamp(timestamp_fmt);
+			/*
+			 * If it's the first time, or verbose mode, print the
+			 * header.
+			 */
+			if (++cb.cb_iteration == 1 || verbose)
+				print_iostat_header(&cb);
 
-		/*
-		 * If it's the first time, or verbose mode, print the header.
-		 */
-		if (++cb.cb_iteration == 1 || verbose)
-			print_iostat_header(&cb);
+			(void) pool_list_iter(list, B_FALSE, print_iostat, &cb);
 
-		(void) pool_list_iter(list, B_FALSE, print_iostat, &cb);
+			/*
+			 * If there's more than one pool, and we're not in
+			 * verbose mode (which prints a separator for us),
+			 * then print a separator.
+			 */
+			if (npools > 1 && !verbose)
+				print_iostat_separator(&cb);
 
-		/*
-		 * If there's more than one pool, and we're not in verbose mode
-		 * (which prints a separator for us), then print a separator.
-		 */
-		if (npools > 1 && !verbose)
-			print_iostat_separator(&cb);
-
-		if (verbose)
-			(void) printf("\n");
+			if (verbose)
+				(void) printf("\n");
+		}
 
 		/*
 		 * Flush the output so that redirection to a file isn't buffered
@@ -2590,10 +2619,12 @@ zpool_do_list(int argc, char **argv)
 		ret = for_each_pool(argc, argv, B_TRUE, &cb.cb_proplist,
 		    list_callback, &cb);
 
-		if (argc == 0 && cb.cb_first && !cb.cb_scripted) {
-			(void) printf(gettext("no pools available\n"));
+		if (argc == 0 && cb.cb_first)
+			(void) fprintf(stderr, gettext("no pools available\n"));
+		else if (argc && cb.cb_first) {
+			/* cannot open the given pool */
 			zprop_free_list(cb.cb_proplist);
-			return (0);
+			return (1);
 		}
 
 		if (interval == 0)
@@ -2681,7 +2712,7 @@ zpool_do_attach_or_replace(int argc, char **argv, int replacing)
 		return (1);
 	}
 
-	nvroot = make_root_vdev(zhp, force, B_FALSE, replacing, B_FALSE,
+	nvroot = make_root_vdev(zhp, NULL, force, B_FALSE, replacing, B_FALSE,
 	    argc, argv);
 	if (nvroot == NULL) {
 		zpool_close(zhp);
@@ -3438,7 +3469,7 @@ print_dedup_stats(nvlist_t *config)
  *        pool: tank
  *	status: DEGRADED
  *	reason: One or more devices ...
- *         see: http://www.sun.com/msg/ZFS-xxxx-01
+ *         see: http://zfsonlinux.org/msg/ZFS-xxxx-01
  *	config:
  *		mirror		DEGRADED
  *                c1t0d0	OK
@@ -3646,7 +3677,7 @@ status_callback(zpool_handle_t *zhp, void *data)
 	}
 
 	if (msgid != NULL)
-		(void) printf(gettext("   see: http://www.sun.com/msg/%s\n"),
+		(void) printf(gettext("   see: http://zfsonlinux.org/msg/%s\n"),
 		    msgid);
 
 	if (config != NULL) {
@@ -3783,7 +3814,7 @@ zpool_do_status(int argc, char **argv)
 		    status_callback, &cb);
 
 		if (argc == 0 && cb.cb_count == 0)
-			(void) printf(gettext("no pools available\n"));
+			(void) fprintf(stderr, gettext("no pools available\n"));
 		else if (cb.cb_explain && cb.cb_first && cb.cb_allpools)
 			(void) printf(gettext("all pools are healthy\n"));
 
@@ -4209,7 +4240,7 @@ zpool_do_history(int argc, char **argv)
 	    &cbdata);
 
 	if (argc == 0 && cbdata.first == B_TRUE) {
-		(void) printf(gettext("no pools available\n"));
+		(void) fprintf(stderr, gettext("no pools available\n"));
 		return (0);
 	}
 

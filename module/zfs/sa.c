@@ -201,6 +201,7 @@ sa_attr_type_t sa_dummy_zpl_layout[] = { 0 };
 
 static int sa_legacy_attr_count = 16;
 static kmem_cache_t *sa_cache = NULL;
+static kmem_cache_t *spill_cache = NULL;
 
 /*ARGSUSED*/
 static int
@@ -232,6 +233,8 @@ sa_cache_init(void)
 	sa_cache = kmem_cache_create("sa_cache",
 	    sizeof (sa_handle_t), 0, sa_cache_constructor,
 	    sa_cache_destructor, NULL, NULL, NULL, 0);
+	spill_cache = kmem_cache_create("spill_cache",
+	    SPA_MAXBLOCKSIZE, 0, NULL, NULL, NULL, NULL, NULL, 0);
 }
 
 void
@@ -239,6 +242,21 @@ sa_cache_fini(void)
 {
 	if (sa_cache)
 		kmem_cache_destroy(sa_cache);
+
+	if (spill_cache)
+		kmem_cache_destroy(spill_cache);
+}
+
+void *
+sa_spill_alloc(int flags)
+{
+	return kmem_cache_alloc(spill_cache, flags);
+}
+
+void
+sa_spill_free(void *obj)
+{
+	kmem_cache_free(spill_cache, obj);
 }
 
 static int
@@ -607,14 +625,14 @@ sa_find_sizes(sa_os_t *sa, sa_bulk_attr_t *attr_desc, int attr_count,
 		 * and spill buffer.
 		 */
 		if (buftype == SA_BONUS && *index == -1 &&
-		    P2ROUNDUP(*total + hdrsize, 8) >
+		    (*total + P2ROUNDUP(hdrsize, 8)) >
 		    (full_space - sizeof (blkptr_t))) {
 			*index = i;
 			done = B_TRUE;
 		}
 
 next:
-		if (P2ROUNDUP(*total + hdrsize, 8) > full_space &&
+		if ((*total + P2ROUNDUP(hdrsize, 8)) > full_space &&
 		    buftype == SA_BONUS)
 			*will_spill = B_TRUE;
 	}
@@ -1316,6 +1334,19 @@ sa_idx_tab_hold(objset_t *os, sa_idx_tab_t *idx_tab)
 }
 
 void
+sa_spill_rele(sa_handle_t *hdl)
+{
+	mutex_enter(&hdl->sa_lock);
+	if (hdl->sa_spill) {
+		sa_idx_tab_rele(hdl->sa_os, hdl->sa_spill_tab);
+		dmu_buf_rele(hdl->sa_spill, NULL);
+		hdl->sa_spill = NULL;
+		hdl->sa_spill_tab = NULL;
+	}
+	mutex_exit(&hdl->sa_lock);
+}
+
+void
 sa_handle_destroy(sa_handle_t *hdl)
 {
 	mutex_enter(&hdl->sa_lock);
@@ -1618,7 +1649,7 @@ sa_modify_attrs(sa_handle_t *hdl, sa_attr_type_t newattr,
 	sa_bulk_attr_t *attr_desc;
 	void *old_data[2];
 	int bonus_attr_count = 0;
-	int bonus_data_size = 0, spill_data_size = 0;
+	int bonus_data_size = 0;
 	int spill_attr_count = 0;
 	int error;
 	uint16_t length;
@@ -1648,8 +1679,8 @@ sa_modify_attrs(sa_handle_t *hdl, sa_attr_type_t newattr,
 	/* Bring spill buffer online if it isn't currently */
 
 	if ((error = sa_get_spill(hdl)) == 0) {
-		spill_data_size = hdl->sa_spill->db_size;
-		old_data[1] = kmem_alloc(spill_data_size, KM_SLEEP);
+		ASSERT3U(hdl->sa_spill->db_size, <=, SPA_MAXBLOCKSIZE);
+		old_data[1] = sa_spill_alloc(KM_SLEEP);
 		bcopy(hdl->sa_spill->db_data, old_data[1],
 		    hdl->sa_spill->db_size);
 		spill_attr_count =
@@ -1729,7 +1760,7 @@ sa_modify_attrs(sa_handle_t *hdl, sa_attr_type_t newattr,
 	if (old_data[0])
 		kmem_free(old_data[0], bonus_data_size);
 	if (old_data[1])
-		kmem_free(old_data[1], spill_data_size);
+		sa_spill_free(old_data[1]);
 	kmem_free(attr_desc, sizeof (sa_bulk_attr_t) * attr_count);
 
 	return (error);
@@ -1969,3 +2000,41 @@ sa_handle_unlock(sa_handle_t *hdl)
 	ASSERT(hdl);
 	mutex_exit(&hdl->sa_lock);
 }
+
+#ifdef _KERNEL
+EXPORT_SYMBOL(sa_handle_get);
+EXPORT_SYMBOL(sa_handle_get_from_db);
+EXPORT_SYMBOL(sa_handle_destroy);
+EXPORT_SYMBOL(sa_buf_hold);
+EXPORT_SYMBOL(sa_buf_rele);
+EXPORT_SYMBOL(sa_spill_rele);
+EXPORT_SYMBOL(sa_lookup);
+EXPORT_SYMBOL(sa_update);
+EXPORT_SYMBOL(sa_remove);
+EXPORT_SYMBOL(sa_bulk_lookup);
+EXPORT_SYMBOL(sa_bulk_lookup_locked);
+EXPORT_SYMBOL(sa_bulk_update);
+EXPORT_SYMBOL(sa_size);
+EXPORT_SYMBOL(sa_update_from_cb);
+EXPORT_SYMBOL(sa_object_info);
+EXPORT_SYMBOL(sa_object_size);
+EXPORT_SYMBOL(sa_update_user);
+EXPORT_SYMBOL(sa_get_userdata);
+EXPORT_SYMBOL(sa_set_userp);
+EXPORT_SYMBOL(sa_get_db);
+EXPORT_SYMBOL(sa_handle_object);
+EXPORT_SYMBOL(sa_register_update_callback);
+EXPORT_SYMBOL(sa_setup);
+EXPORT_SYMBOL(sa_replace_all_by_template);
+EXPORT_SYMBOL(sa_replace_all_by_template_locked);
+EXPORT_SYMBOL(sa_enabled);
+EXPORT_SYMBOL(sa_cache_init);
+EXPORT_SYMBOL(sa_cache_fini);
+EXPORT_SYMBOL(sa_spill_alloc);
+EXPORT_SYMBOL(sa_spill_free);
+EXPORT_SYMBOL(sa_set_sa_object);
+EXPORT_SYMBOL(sa_hdrsize);
+EXPORT_SYMBOL(sa_handle_lock);
+EXPORT_SYMBOL(sa_handle_unlock);
+EXPORT_SYMBOL(sa_lookup_uio);
+#endif /* _KERNEL */

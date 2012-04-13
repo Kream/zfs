@@ -171,9 +171,8 @@ void
 dnode_init(void)
 {
 	ASSERT(dnode_cache == NULL);
-	dnode_cache = kmem_cache_create("dnode_t",
-	    sizeof (dnode_t),
-	    0, dnode_cons, dnode_dest, NULL, NULL, NULL, 0);
+	dnode_cache = kmem_cache_create("dnode_t", sizeof (dnode_t),
+	    0, dnode_cons, dnode_dest, NULL, NULL, NULL, KMC_KMEM);
 	kmem_cache_set_move(dnode_cache, dnode_move);
 }
 
@@ -1074,7 +1073,8 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag,
 		int i;
 		dnode_children_t *winner;
 		children_dnodes = kmem_alloc(sizeof (dnode_children_t) +
-		    (epb - 1) * sizeof (dnode_handle_t), KM_SLEEP | KM_NODEBUG);
+		    (epb - 1) * sizeof (dnode_handle_t),
+		    KM_PUSHPAGE | KM_NODEBUG);
 		children_dnodes->dnc_count = epb;
 		dnh = &children_dnodes->dnc_children[0];
 		for (i = 0; i < epb; i++) {

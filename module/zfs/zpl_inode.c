@@ -25,6 +25,7 @@
 
 #include <sys/zfs_vfsops.h>
 #include <sys/zfs_vnops.h>
+#include <sys/zfs_znode.h>
 #include <sys/vfs.h>
 #include <sys/zpl.h>
 
@@ -51,6 +52,24 @@ zpl_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 	return d_splice_alias(ip, dentry);
 }
 
+void
+zpl_vap_init(vattr_t *vap, struct inode *dir, struct dentry *dentry,
+    mode_t mode, cred_t *cr)
+{
+	vap->va_mask = ATTR_MODE;
+	vap->va_mode = mode;
+	vap->va_dentry = dentry;
+	vap->va_uid = crgetfsuid(cr);
+
+	if (dir && dir->i_mode & S_ISGID) {
+		vap->va_gid = dir->i_gid;
+		if (S_ISDIR(mode))
+			vap->va_mode |= S_ISGID;
+	} else {
+		vap->va_gid = crgetfsgid(cr);
+	}
+}
+
 static int
 zpl_create(struct inode *dir, struct dentry *dentry, int mode,
     struct nameidata *nd)
@@ -62,11 +81,7 @@ zpl_create(struct inode *dir, struct dentry *dentry, int mode,
 
 	crhold(cr);
 	vap = kmem_zalloc(sizeof(vattr_t), KM_SLEEP);
-	vap->va_mode = mode;
-	vap->va_mask = ATTR_MODE;
-	vap->va_uid = crgetfsuid(cr);
-	vap->va_gid = crgetfsgid(cr);
-	vap->va_dentry = dentry;
+	zpl_vap_init(vap, dir, dentry, mode, cr);
 
 	error = -zfs_create(dir, (char *)dentry->d_name.name,
 	    vap, 0, mode, &ip, cr, 0, NULL);
@@ -85,14 +100,17 @@ zpl_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t rdev)
 	vattr_t *vap;
 	int error;
 
+	/*
+	 * We currently expect Linux to supply rdev=0 for all sockets
+	 * and fifos, but we want to know if this behavior ever changes.
+	 */
+	if (S_ISSOCK(mode) || S_ISFIFO(mode))
+		ASSERT(rdev == 0);
+
 	crhold(cr);
 	vap = kmem_zalloc(sizeof(vattr_t), KM_SLEEP);
-	vap->va_mode = mode;
-	vap->va_mask = ATTR_MODE;
+	zpl_vap_init(vap, dir, dentry, mode, cr);
 	vap->va_rdev = rdev;
-	vap->va_uid = crgetfsuid(cr);
-	vap->va_gid = crgetfsgid(cr);
-	vap->va_dentry = dentry;
 
 	error = -zfs_create(dir, (char *)dentry->d_name.name,
 	    vap, 0, mode, &ip, cr, 0, NULL);
@@ -127,11 +145,7 @@ zpl_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 
 	crhold(cr);
 	vap = kmem_zalloc(sizeof(vattr_t), KM_SLEEP);
-	vap->va_mode = S_IFDIR | mode;
-	vap->va_mask = ATTR_MODE;
-	vap->va_uid = crgetfsuid(cr);
-	vap->va_gid = crgetfsgid(cr);
-	vap->va_dentry = dentry;
+	zpl_vap_init(vap, dir, dentry, mode | S_IFDIR, cr);
 
 	error = -zfs_mkdir(dir, dname(dentry), vap, &ip, cr, 0, NULL);
 	kmem_free(vap, sizeof(vattr_t));
@@ -158,35 +172,21 @@ zpl_rmdir(struct inode * dir, struct dentry *dentry)
 static int
 zpl_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
 {
-	cred_t *cr = CRED();
-	vattr_t *vap;
-	struct inode *ip;
+	boolean_t issnap = ITOZSB(dentry->d_inode)->z_issnap;
 	int error;
 
-	ip = dentry->d_inode;
-	crhold(cr);
-	vap = kmem_zalloc(sizeof(vattr_t), KM_SLEEP);
+	/*
+	 * Ensure MNT_SHRINKABLE is set on snapshots to ensure they are
+	 * unmounted automatically with the parent file system.  This
+	 * is done on the first getattr because it's not easy to get the
+	 * vfsmount structure at mount time.  This call path is explicitly
+	 * marked unlikely to avoid any performance impact.  FWIW, ext4
+	 * resorts to a similar trick for sysadmin convenience.
+	 */
+	if (unlikely(issnap && !(mnt->mnt_flags & MNT_SHRINKABLE)))
+		mnt->mnt_flags |= MNT_SHRINKABLE;
 
-	error = -zfs_getattr(ip, vap, 0, cr);
-	if (error)
-		goto out;
-
-	stat->ino = ip->i_ino;
-	stat->dev = ip->i_sb->s_dev;
-	stat->mode = vap->va_mode;
-	stat->nlink = vap->va_nlink;
-	stat->uid = vap->va_uid;
-	stat->gid = vap->va_gid;
-	stat->rdev = vap->va_rdev;
-	stat->size = vap->va_size;
-	stat->atime = vap->va_atime;
-	stat->mtime = vap->va_mtime;
-	stat->ctime = vap->va_ctime;
-	stat->blksize = vap->va_blksize;
-	stat->blocks = vap->va_nblocks;
-out:
-	kmem_free(vap, sizeof(vattr_t));
-	crfree(cr);
+	error = -zfs_getattr_fast(dentry->d_inode, stat);
 	ASSERT3S(error, <=, 0);
 
 	return (error);
@@ -248,11 +248,7 @@ zpl_symlink(struct inode *dir, struct dentry *dentry, const char *name)
 
 	crhold(cr);
 	vap = kmem_zalloc(sizeof(vattr_t), KM_SLEEP);
-	vap->va_mode = S_IFLNK | S_IRWXUGO;
-	vap->va_mask = ATTR_MODE;
-	vap->va_uid = crgetfsuid(cr);
-	vap->va_gid = crgetfsgid(cr);
-	vap->va_dentry = dentry;
+	zpl_vap_init(vap, dir, dentry, S_IFLNK | S_IRWXUGO, cr);
 
 	error = -zfs_symlink(dir, dname(dentry), vap, (char *)name, &ip, cr, 0);
 	kmem_free(vap, sizeof(vattr_t));
@@ -332,6 +328,42 @@ out:
 	return (error);
 }
 
+static void
+zpl_truncate_range(struct inode* ip, loff_t start, loff_t end)
+{
+	cred_t *cr = CRED();
+	flock64_t bf;
+
+	ASSERT3S(start, <=, end);
+
+	/*
+	 * zfs_freesp() will interpret (len == 0) as meaning "truncate until
+	 * the end of the file". We don't want that.
+	 */
+	if (start == end)
+		return;
+
+	crhold(cr);
+
+	bf.l_type = F_WRLCK;
+	bf.l_whence = 0;
+	bf.l_start = start;
+	bf.l_len = end - start;
+	bf.l_pid = 0;
+	zfs_space(ip, F_FREESP, &bf, FWRITE, start, cr);
+
+	crfree(cr);
+}
+
+#ifdef HAVE_INODE_FALLOCATE
+static long
+zpl_fallocate(struct inode *ip, int mode, loff_t offset, loff_t len)
+{
+	return zpl_fallocate_common(ip, mode, offset, len);
+}
+#endif /* HAVE_INODE_FALLOCATE */
+
+
 const struct inode_operations zpl_inode_operations = {
 	.create		= zpl_create,
 	.link		= zpl_link,
@@ -347,6 +379,10 @@ const struct inode_operations zpl_inode_operations = {
 	.getxattr	= generic_getxattr,
 	.removexattr	= generic_removexattr,
 	.listxattr	= zpl_xattr_list,
+	.truncate_range = zpl_truncate_range,
+#ifdef HAVE_INODE_FALLOCATE
+	.fallocate	= zpl_fallocate,
+#endif /* HAVE_INODE_FALLOCATE */
 };
 
 const struct inode_operations zpl_dir_inode_operations = {
@@ -371,6 +407,12 @@ const struct inode_operations zpl_symlink_inode_operations = {
 	.readlink	= generic_readlink,
 	.follow_link	= zpl_follow_link,
 	.put_link	= zpl_put_link,
+	.setattr	= zpl_setattr,
+	.getattr	= zpl_getattr,
+	.setxattr	= generic_setxattr,
+	.getxattr	= generic_getxattr,
+	.removexattr	= generic_removexattr,
+	.listxattr	= zpl_xattr_list,
 };
 
 const struct inode_operations zpl_special_inode_operations = {

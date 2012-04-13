@@ -76,18 +76,78 @@ zpl_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	return (error);
 }
 
-ZPL_FSYNC_PROTO(zpl_fsync, filp, unused_dentry, datasync)
+#if defined(HAVE_FSYNC_WITH_DENTRY)
+/*
+ * Linux 2.6.x - 2.6.34 API,
+ * Through 2.6.34 the nfsd kernel server would pass a NULL 'file struct *'
+ * to the fops->fsync() hook.  For this reason, we must be careful not to
+ * use filp unconditionally.
+ */
+static int
+zpl_fsync(struct file *filp, struct dentry *dentry, int datasync)
 {
 	cred_t *cr = CRED();
 	int error;
 
 	crhold(cr);
-	error = -zfs_fsync(filp->f_path.dentry->d_inode, datasync, cr);
+	error = -zfs_fsync(dentry->d_inode, datasync, cr);
 	crfree(cr);
 	ASSERT3S(error, <=, 0);
 
 	return (error);
 }
+
+#elif defined(HAVE_FSYNC_WITHOUT_DENTRY)
+/*
+ * Linux 2.6.35 - 3.0 API,
+ * As of 2.6.35 the dentry argument to the fops->fsync() hook was deemed
+ * redundant.  The dentry is still accessible via filp->f_path.dentry,
+ * and we are guaranteed that filp will never be NULL.
+ */
+static int
+zpl_fsync(struct file *filp, int datasync)
+{
+	struct inode *inode = filp->f_mapping->host;
+	cred_t *cr = CRED();
+	int error;
+
+	crhold(cr);
+	error = -zfs_fsync(inode, datasync, cr);
+	crfree(cr);
+	ASSERT3S(error, <=, 0);
+
+	return (error);
+}
+
+#elif defined(HAVE_FSYNC_RANGE)
+/*
+ * Linux 3.1 - 3.x API,
+ * As of 3.1 the responsibility to call filemap_write_and_wait_range() has
+ * been pushed down in to the .fsync() vfs hook.  Additionally, the i_mutex
+ * lock is no longer held by the caller, for zfs we don't require the lock
+ * to be held so we don't acquire it.
+ */
+static int
+zpl_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
+{
+	struct inode *inode = filp->f_mapping->host;
+	cred_t *cr = CRED();
+	int error;
+
+	error = filemap_write_and_wait_range(inode->i_mapping, start, end);
+	if (error)
+		return (error);
+
+	crhold(cr);
+	error = -zfs_fsync(inode, datasync, cr);
+	crfree(cr);
+	ASSERT3S(error, <=, 0);
+
+	return (error);
+}
+#else
+#error "Unsupported fops->fsync() implementation"
+#endif
 
 ssize_t
 zpl_read_common(struct inode *ip, const char *buf, size_t len, loff_t pos,
@@ -221,8 +281,14 @@ zpl_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
 static int
 zpl_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-	znode_t *zp = ITOZ(filp->f_mapping->host);
+	struct inode *ip = filp->f_mapping->host;
+	znode_t *zp = ITOZ(ip);
 	int error;
+
+	error = -zfs_map(ip, vma->vm_pgoff, (caddr_t *)vma->vm_start,
+	    (size_t)(vma->vm_end - vma->vm_start), vma->vm_flags);
+	if (error)
+		return (error);
 
 	error = generic_file_mmap(filp, vma);
 	if (error)
@@ -248,33 +314,14 @@ static int
 zpl_readpage(struct file *filp, struct page *pp)
 {
 	struct inode *ip;
-	loff_t off, i_size;
-	size_t len, wrote;
-	cred_t *cr = CRED();
-	void *pb;
+	struct page *pl[1];
 	int error = 0;
 
 	ASSERT(PageLocked(pp));
 	ip = pp->mapping->host;
-	off = page_offset(pp);
-	i_size = i_size_read(ip);
-	ASSERT3S(off, <, i_size);
+	pl[0] = pp;
 
-	crhold(cr);
-	len = MIN(PAGE_CACHE_SIZE, i_size - off);
-
-	pb = kmap(pp);
-
-	/* O_DIRECT is passed to bypass the page cache and avoid deadlock. */
-	wrote = zpl_read_common(ip, pb, len, off, UIO_SYSSPACE, O_DIRECT, cr);
-	if (wrote != len)
-		error = -EIO;
-
-	if (!error && (len < PAGE_CACHE_SIZE))
-		memset(pb + len, 0, PAGE_CACHE_SIZE - len);
-
-	kunmap(pp);
-	crfree(cr);
+	error = -zfs_getpage(ip, pl, 1);
 
 	if (error) {
 		SetPageError(pp);
@@ -286,8 +333,53 @@ zpl_readpage(struct file *filp, struct page *pp)
 	}
 
 	unlock_page(pp);
+	return error;
+}
 
-	return (error);
+/*
+ * Populate a set of pages with data for the Linux page cache.  This
+ * function will only be called for read ahead and never for demand
+ * paging.  For simplicity, the code relies on read_cache_pages() to
+ * correctly lock each page for IO and call zpl_readpage().
+ */
+static int
+zpl_readpages(struct file *filp, struct address_space *mapping,
+	struct list_head *pages, unsigned nr_pages)
+{
+	return (read_cache_pages(mapping, pages,
+	    (filler_t *)zpl_readpage, filp));
+}
+
+int
+zpl_putpage(struct page *pp, struct writeback_control *wbc, void *data)
+{
+	struct address_space *mapping = data;
+
+	ASSERT(PageLocked(pp));
+	ASSERT(!PageWriteback(pp));
+
+	/*
+	 * Disable the normal reclaim path for zpl_putpage().  This
+	 * ensures that all memory allocations under this call path
+	 * will never enter direct reclaim.  If this were to happen
+	 * the VM might try to write out additional pages by calling
+	 * zpl_putpage() again resulting in a deadlock.
+	 */
+	if (current->flags & PF_MEMALLOC) {
+		(void) zfs_putpage(mapping->host, pp, wbc);
+	} else {
+		current->flags |= PF_MEMALLOC;
+		(void) zfs_putpage(mapping->host, pp, wbc);
+		current->flags &= ~PF_MEMALLOC;
+	}
+
+	return (0);
+}
+
+static int
+zpl_writepages(struct address_space *mapping, struct writeback_control *wbc)
+{
+	return write_cache_pages(mapping, wbc, zpl_putpage, mapping);
 }
 
 /*
@@ -295,55 +387,62 @@ zpl_readpage(struct file *filp, struct page *pp)
  * support mmap(2).  Mapped pages may be dirtied by memory operations
  * which never call .write().  These dirty pages are kept in sync with
  * the ARC buffers via this hook.
- *
- * Currently this function relies on zpl_write_common() and the O_DIRECT
- * flag to push out the page.  This works but the more correct way is
- * to update zfs_putapage() to be Linux friendly and use that interface.
  */
 static int
 zpl_writepage(struct page *pp, struct writeback_control *wbc)
 {
-	struct inode *ip;
-	loff_t off, i_size;
-	size_t len, read;
-	cred_t *cr = CRED();
-	void *pb;
-	int error = 0;
+	return zpl_putpage(pp, wbc, pp->mapping);
+}
 
-	ASSERT(PageLocked(pp));
-	ip = pp->mapping->host;
-	off = page_offset(pp);
-	i_size = i_size_read(ip);
+/*
+ * The only flag combination which matches the behavior of zfs_space()
+ * is FALLOC_FL_PUNCH_HOLE.  This flag was introduced in the 2.6.38 kernel.
+ */
+long
+zpl_fallocate_common(struct inode *ip, int mode, loff_t offset, loff_t len)
+{
+	cred_t *cr = CRED();
+	int error = -EOPNOTSUPP;
+
+	if (mode & FALLOC_FL_KEEP_SIZE)
+		return (-EOPNOTSUPP);
 
 	crhold(cr);
-	len = MIN(PAGE_CACHE_SIZE, i_size - off);
 
-	pb = kmap(pp);
+#ifdef FALLOC_FL_PUNCH_HOLE
+	if (mode & FALLOC_FL_PUNCH_HOLE) {
+		flock64_t bf;
 
-	/* O_DIRECT is passed to bypass the page cache and avoid deadlock. */
-	read = zpl_write_common(ip, pb, len, off, UIO_SYSSPACE, O_DIRECT, cr);
-	if (read != len)
-		error = -EIO;
+		bf.l_type = F_WRLCK;
+		bf.l_whence = 0;
+		bf.l_start = offset;
+		bf.l_len = len;
+		bf.l_pid = 0;
 
-	kunmap(pp);
+		error = -zfs_space(ip, F_FREESP, &bf, FWRITE, offset, cr);
+	}
+#endif /* FALLOC_FL_PUNCH_HOLE */
+
 	crfree(cr);
 
-	if (error) {
-		SetPageError(pp);
-		ClearPageUptodate(pp);
-	} else {
-		ClearPageError(pp);
-		SetPageUptodate(pp);
-	}
-
-	unlock_page(pp);
-
+	ASSERT3S(error, <=, 0);
 	return (error);
 }
 
+#ifdef HAVE_FILE_FALLOCATE
+static long
+zpl_fallocate(struct file *filp, int mode, loff_t offset, loff_t len)
+{
+	return zpl_fallocate_common(filp->f_path.dentry->d_inode,
+	    mode, offset, len);
+}
+#endif /* HAVE_FILE_FALLOCATE */
+
 const struct address_space_operations zpl_address_space_operations = {
+	.readpages	= zpl_readpages,
 	.readpage	= zpl_readpage,
 	.writepage	= zpl_writepage,
+	.writepages     = zpl_writepages,
 };
 
 const struct file_operations zpl_file_operations = {
@@ -355,6 +454,9 @@ const struct file_operations zpl_file_operations = {
 	.readdir	= zpl_readdir,
 	.mmap		= zpl_mmap,
 	.fsync		= zpl_fsync,
+#ifdef HAVE_FILE_FALLOCATE
+	.fallocate      = zpl_fallocate,
+#endif /* HAVE_FILE_FALLOCATE */
 };
 
 const struct file_operations zpl_dir_file_operations = {

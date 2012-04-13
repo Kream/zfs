@@ -55,6 +55,7 @@ COMMON_H = \
 	$(top_srcdir)/include/sys/zap_leaf.h \
 	$(top_srcdir)/include/sys/zfs_acl.h \
 	$(top_srcdir)/include/sys/zfs_context.h \
+	$(top_srcdir)/include/sys/zfs_ctldir.h \
 	$(top_srcdir)/include/sys/zfs_debug.h \
 	$(top_srcdir)/include/sys/zfs_dir.h \
 	$(top_srcdir)/include/sys/zfs_fuid.h \
@@ -88,6 +89,6 @@ libzfs_HEADERS = $(COMMON_H) $(USER_H)
 endif
 
 if CONFIG_KERNEL
-kerneldir = /usr/src/zfs-$(ZFS_META_VERSION)/$(LINUX_VERSION)/sys
+kerneldir = /usr/src/zfs-$(ZFS_META_VERSION)-$(ZFS_META_RELEASE)/$(LINUX_VERSION)/sys
 kernel_HEADERS = $(COMMON_H) $(KERNEL_H)
 endif

@@ -56,6 +56,7 @@
 #include <sys/modctl.h>
 #include <sys/refstr.h>
 #include <sys/zfs_ioctl.h>
+#include <sys/zfs_ctldir.h>
 #include <sys/zfs_fuid.h>
 #include <sys/bootconf.h>
 #include <sys/sunddi.h>
@@ -122,22 +123,17 @@ zfs_sync(struct super_block *sb, int wait, cred_t *cr)
 }
 EXPORT_SYMBOL(zfs_sync);
 
+boolean_t
+zfs_is_readonly(zfs_sb_t *zsb)
+{
+	return (!!(zsb->z_sb->s_flags & MS_RDONLY));
+}
+EXPORT_SYMBOL(zfs_is_readonly);
+
 static void
 atime_changed_cb(void *arg, uint64_t newval)
 {
-	zfs_sb_t *zsb = arg;
-	struct super_block *sb = zsb->z_sb;
-	struct vfsmount *vfs = zsb->z_vfs;
-
-	if (newval == TRUE) {
-		vfs->mnt_flags &= ~MNT_NOATIME;
-		sb->s_flags &= ~MS_NOATIME;
-		zsb->z_atime = TRUE;
-	} else {
-		vfs->mnt_flags |= MNT_NOATIME;
-		sb->s_flags |= MS_NOATIME;
-		zsb->z_atime = FALSE;
-	}
+	((zfs_sb_t *)arg)->z_atime = newval;
 }
 
 static void
@@ -145,10 +141,15 @@ xattr_changed_cb(void *arg, uint64_t newval)
 {
 	zfs_sb_t *zsb = arg;
 
-	if (newval == TRUE) {
-		zsb->z_flags |= ZSB_XATTR_USER;
+	if (newval == ZFS_XATTR_OFF) {
+		zsb->z_flags &= ~ZSB_XATTR;
 	} else {
-		zsb->z_flags &= ~ZSB_XATTR_USER;
+		zsb->z_flags |= ZSB_XATTR;
+
+		if (newval == ZFS_XATTR_SA)
+			zsb->z_xattr_sa = B_TRUE;
+		else
+			zsb->z_xattr_sa = B_FALSE;
 	}
 }
 
@@ -169,84 +170,44 @@ readonly_changed_cb(void *arg, uint64_t newval)
 {
 	zfs_sb_t *zsb = arg;
 	struct super_block *sb = zsb->z_sb;
-	struct vfsmount *vfs = zsb->z_vfs;
 
-	if (newval) {
-		vfs->mnt_flags |= MNT_READONLY;
+	if (sb == NULL)
+		return;
+
+	if (newval)
 		sb->s_flags |= MS_RDONLY;
-	} else {
-		vfs->mnt_flags &= ~MNT_READONLY;
+	else
 		sb->s_flags &= ~MS_RDONLY;
-	}
 }
 
 static void
 devices_changed_cb(void *arg, uint64_t newval)
 {
-	zfs_sb_t *zsb = arg;
-	struct super_block *sb = zsb->z_sb;
-	struct vfsmount *vfs = zsb->z_vfs;
-
-	if (newval == FALSE) {
-		vfs->mnt_flags |= MNT_NODEV;
-		sb->s_flags |= MS_NODEV;
-	} else {
-		vfs->mnt_flags &= ~MNT_NODEV;
-		sb->s_flags &= ~MS_NODEV;
-	}
 }
 
 static void
 setuid_changed_cb(void *arg, uint64_t newval)
 {
-	zfs_sb_t *zsb = arg;
-	struct super_block *sb = zsb->z_sb;
-	struct vfsmount *vfs = zsb->z_vfs;
-
-	if (newval == FALSE) {
-		vfs->mnt_flags |= MNT_NOSUID;
-		sb->s_flags |= MS_NOSUID;
-	} else {
-		vfs->mnt_flags &= ~MNT_NOSUID;
-		sb->s_flags &= ~MS_NOSUID;
-	}
 }
 
 static void
 exec_changed_cb(void *arg, uint64_t newval)
 {
-	zfs_sb_t *zsb = arg;
-	struct super_block *sb = zsb->z_sb;
-	struct vfsmount *vfs = zsb->z_vfs;
-
-	if (newval == FALSE) {
-		vfs->mnt_flags |= MNT_NOEXEC;
-		sb->s_flags |= MS_NOEXEC;
-	} else {
-		vfs->mnt_flags &= ~MNT_NOEXEC;
-		sb->s_flags &= ~MS_NOEXEC;
-	}
 }
 
-/*
- * The nbmand mount option can be changed at mount time.
- * We can't allow it to be toggled on live file systems or incorrect
- * behavior may be seen from cifs clients
- *
- * This property isn't registered via dsl_prop_register(), but this callback
- * will be called when a file system is first mounted
- */
 static void
 nbmand_changed_cb(void *arg, uint64_t newval)
 {
 	zfs_sb_t *zsb = arg;
 	struct super_block *sb = zsb->z_sb;
 
-	if (newval == TRUE) {
+	if (sb == NULL)
+		return;
+
+	if (newval == TRUE)
 		sb->s_flags |= MS_MANDLOCK;
-	} else {
+	else
 		sb->s_flags &= ~MS_MANDLOCK;
-	}
 }
 
 static void
@@ -270,58 +231,12 @@ acl_inherit_changed_cb(void *arg, uint64_t newval)
 int
 zfs_register_callbacks(zfs_sb_t *zsb)
 {
-	struct vfsmount *vfsp = zsb->z_vfs;
 	struct dsl_dataset *ds = NULL;
 	objset_t *os = zsb->z_os;
-	uint64_t nbmand;
-	boolean_t readonly = B_FALSE;
-	boolean_t setuid = B_TRUE;
-	boolean_t exec = B_TRUE;
-	boolean_t devices = B_TRUE;
-	boolean_t xattr = B_TRUE;
-	boolean_t atime = B_TRUE;
-	char osname[MAXNAMELEN];
 	int error = 0;
 
-	/*
-	 * While Linux allows multiple vfs mounts per super block we have
-	 * limited it artificially to one in zfs_fill_super.  Thus it is
-	 * safe for us to modify the vfs mount fails through the callbacks.
-	 */
-	if ((vfsp->mnt_flags & MNT_READONLY) ||
-	    !spa_writeable(dmu_objset_spa(os)))
-		readonly = B_TRUE;
-
-	if (vfsp->mnt_flags & MNT_NOSUID) {
-		devices = B_FALSE;
-		setuid = B_FALSE;
-	} else {
-		if (vfsp->mnt_flags & MNT_NODEV)
-			devices = B_FALSE;
-	}
-
-	if (vfsp->mnt_flags & MNT_NOEXEC)
-		exec = B_FALSE;
-
-	if (vfsp->mnt_flags & MNT_NOATIME)
-		atime = B_FALSE;
-
-	/*
-	 * nbmand is a special property which may only be changed at
-	 * mount time.  Unfortunately, Linux does not have a VFS mount
-	 * flag instead this is a super block flag.  So setting this
-	 * option at mount time will have to wait until we can parse
-	 * the mount option string.  For now we rely on the nbmand
-	 * value stored with the object set.  Additional mount option
-	 * string to be handled:
-	 *
-	 *   case: sensitive|insensitive|mixed
-	 *   zerocopy: on|off
-	 */
-
-	dmu_objset_name(os, osname);
-	if ((error = dsl_prop_get_integer(osname, "nbmand", &nbmand, NULL)))
-		return (error);
+	if (zfs_is_readonly(zsb) || !spa_writeable(dmu_objset_spa(os)))
+		readonly_changed_cb(zsb, B_TRUE);
 
 	/*
 	 * Register property callbacks.
@@ -351,19 +266,10 @@ zfs_register_callbacks(zfs_sb_t *zsb)
 	    "aclinherit", acl_inherit_changed_cb, zsb);
 	error = error ? error : dsl_prop_register(ds,
 	    "vscan", vscan_changed_cb, zsb);
+	error = error ? error : dsl_prop_register(ds,
+	    "nbmand", nbmand_changed_cb, zsb);
 	if (error)
 		goto unregister;
-
-	/*
-	 * Invoke our callbacks to set required flags.
-	 */
-	readonly_changed_cb(zsb, readonly);
-	setuid_changed_cb(zsb, setuid);
-	exec_changed_cb(zsb, exec);
-	devices_changed_cb(zsb, devices);
-	xattr_changed_cb(zsb, xattr);
-	atime_changed_cb(zsb, atime);
-	nbmand_changed_cb(zsb, nbmand);
 
 	return (0);
 
@@ -384,6 +290,7 @@ unregister:
 	(void) dsl_prop_unregister(ds, "aclinherit", acl_inherit_changed_cb,
 	    zsb);
 	(void) dsl_prop_unregister(ds, "vscan", vscan_changed_cb, zsb);
+	(void) dsl_prop_unregister(ds, "nbmand", nbmand_changed_cb, zsb);
 
 	return (error);
 }
@@ -694,7 +601,7 @@ zfs_sb_create(const char *osname, zfs_sb_t **zsbp)
 	 * Should probably make this a kmem cache, shuffle fields,
 	 * and just bzero up to z_hold_mtx[].
 	 */
-	zsb->z_vfs = NULL;
+	zsb->z_sb = NULL;
 	zsb->z_parent = zsb;
 	zsb->z_max_blksz = SPA_MAXBLOCKSIZE;
 	zsb->z_show_ctldir = ZFS_SNAPDIR_VISIBLE;
@@ -740,7 +647,11 @@ zfs_sb_create(const char *osname, zfs_sb_t **zsbp)
 		error = zap_lookup(os, MASTER_NODE_OBJ, ZFS_SA_ATTRS, 8, 1,
 		    &sa_obj);
 		if (error)
-			return (error);
+			goto out;
+
+		error = zfs_get_zplprop(os, ZFS_PROP_XATTR, &zval);
+		if ((error == 0) && (zval == ZFS_XATTR_SA))
+			zsb->z_xattr_sa = B_TRUE;
 	} else {
 		/*
 		 * Pre SA versions file systems should never touch
@@ -800,6 +711,10 @@ zfs_sb_create(const char *osname, zfs_sb_t **zsbp)
 	for (i = 0; i != ZFS_OBJ_MTX_SZ; i++)
 		mutex_init(&zsb->z_hold_mtx[i], NULL, MUTEX_DEFAULT, NULL);
 
+	avl_create(&zsb->z_ctldir_snaps, snapentry_compare,
+	    sizeof (zfs_snapentry_t), offsetof(zfs_snapentry_t, se_node));
+	mutex_init(&zsb->z_ctldir_lock, NULL, MUTEX_DEFAULT, NULL);
+
 	*zsbp = zsb;
 	return (0);
 
@@ -809,8 +724,9 @@ out:
 	kmem_free(zsb, sizeof (zfs_sb_t));
 	return (error);
 }
+EXPORT_SYMBOL(zfs_sb_create);
 
-static int
+int
 zfs_sb_setup(zfs_sb_t *zsb, boolean_t mounting)
 {
 	int error;
@@ -840,9 +756,9 @@ zfs_sb_setup(zfs_sb_t *zsb, boolean_t mounting)
 		 * During replay we remove the read only flag to
 		 * allow replays to succeed.
 		 */
-		readonly = zsb->z_vfs->mnt_flags & MNT_READONLY;
+		readonly = zfs_is_readonly(zsb);
 		if (readonly != 0)
-			zsb->z_vfs->mnt_flags &= ~MNT_READONLY;
+			readonly_changed_cb(zsb, B_FALSE);
 		else
 			zfs_unlinked_drain(zsb);
 
@@ -883,11 +799,15 @@ zfs_sb_setup(zfs_sb_t *zsb, boolean_t mounting)
 				zsb->z_replay = B_FALSE;
 			}
 		}
-		zsb->z_vfs->mnt_flags |= readonly; /* restore readonly bit */
+
+		/* restore readonly bit */
+		if (readonly != 0)
+			readonly_changed_cb(zsb, B_TRUE);
 	}
 
 	return (0);
 }
+EXPORT_SYMBOL(zfs_sb_setup);
 
 void
 zfs_sb_free(zfs_sb_t *zsb)
@@ -904,8 +824,11 @@ zfs_sb_free(zfs_sb_t *zsb)
 	rw_destroy(&zsb->z_fuid_lock);
 	for (i = 0; i != ZFS_OBJ_MTX_SZ; i++)
 		mutex_destroy(&zsb->z_hold_mtx[i]);
+	mutex_destroy(&zsb->z_ctldir_lock);
+	avl_destroy(&zsb->z_ctldir_snaps);
 	kmem_free(zsb, sizeof (zfs_sb_t));
 }
+EXPORT_SYMBOL(zfs_sb_free);
 
 static void
 zfs_set_fuid_feature(zfs_sb_t *zsb)
@@ -954,6 +877,9 @@ zfs_unregister_callbacks(zfs_sb_t *zsb)
 
 		VERIFY(dsl_prop_unregister(ds, "vscan",
 		    vscan_changed_cb, zsb) == 0);
+
+		VERIFY(dsl_prop_unregister(ds, "nbmand",
+		    nbmand_changed_cb, zsb) == 0);
 	}
 }
 EXPORT_SYMBOL(zfs_unregister_callbacks);
@@ -986,6 +912,7 @@ zfs_check_global_label(const char *dsname, const char *hexsl)
 	}
 	return (EACCES);
 }
+EXPORT_SYMBOL(zfs_check_global_label);
 #endif /* HAVE_MLSLABEL */
 
 int
@@ -1031,7 +958,7 @@ zfs_statvfs(struct dentry *dentry, struct kstatfs *statp)
 	 * For f_ffree, report the smaller of the number of object available
 	 * and the number of blocks (each object will take at least a block).
 	 */
-	statp->f_ffree = MIN(availobjs, statp->f_bfree);
+	statp->f_ffree = MIN(availobjs, availbytes >> DNODE_SHIFT);
 	statp->f_files = statp->f_ffree + usedobjs;
 	statp->f_fsid.val[0] = dentry->d_sb->s_dev;
 	statp->f_fsid.val[1] = 0;
@@ -1066,6 +993,26 @@ zfs_root(zfs_sb_t *zsb, struct inode **ipp)
 }
 EXPORT_SYMBOL(zfs_root);
 
+#ifdef HAVE_SHRINK
+int
+zfs_sb_prune(struct super_block *sb, unsigned long nr_to_scan, int *objects)
+{
+	zfs_sb_t *zsb = sb->s_fs_info;
+	struct shrinker *shrinker = &sb->s_shrink;
+	struct shrink_control sc = {
+		.nr_to_scan = nr_to_scan,
+		.gfp_mask = GFP_KERNEL,
+	};
+
+	ZFS_ENTER(zsb);
+	*objects = (*shrinker->shrink)(shrinker, &sc);
+	ZFS_EXIT(zsb);
+
+	return (0);
+}
+EXPORT_SYMBOL(zfs_sb_prune);
+#endif /* HAVE_SHRINK */
+
 /*
  * Teardown the zfs_sb_t::z_os.
  *
@@ -1073,7 +1020,7 @@ EXPORT_SYMBOL(zfs_root);
  * and 'z_teardown_inactive_lock' held.
  */
 int
-zfsvfs_teardown(zfs_sb_t *zsb, boolean_t unmounting)
+zfs_sb_teardown(zfs_sb_t *zsb, boolean_t unmounting)
 {
 	znode_t	*zp;
 
@@ -1090,6 +1037,12 @@ zfsvfs_teardown(zfs_sb_t *zsb, boolean_t unmounting)
 		shrink_dcache_sb(zsb->z_parent->z_sb);
 		(void) spl_invalidate_inodes(zsb->z_parent->z_sb, 0);
 	}
+
+	/*
+	 * Drain the iput_taskq to ensure all active references to the
+	 * zfs_sb_t have been handled only then can it be safely destroyed.
+	 */
+	taskq_wait(dsl_pool_iput_taskq(dmu_objset_pool(zsb->z_os)));
 
 	/*
 	 * Close the zil. NB: Can't close the zil while zfs_inactive
@@ -1158,12 +1111,17 @@ zfsvfs_teardown(zfs_sb_t *zsb, boolean_t unmounting)
 	 * Evict cached data
 	 */
 	if (dmu_objset_is_dirty_anywhere(zsb->z_os))
-		if (!(zsb->z_vfs->mnt_flags & MNT_READONLY))
+		if (!zfs_is_readonly(zsb))
 			txg_wait_synced(dmu_objset_pool(zsb->z_os), 0);
 	(void) dmu_objset_evict_dbufs(zsb->z_os);
 
 	return (0);
 }
+EXPORT_SYMBOL(zfs_sb_teardown);
+
+#if defined(HAVE_BDI) && !defined(HAVE_BDI_SETUP_AND_REGISTER)
+atomic_long_t zfs_bdi_seq = ATOMIC_LONG_INIT(0);
+#endif /* HAVE_BDI && !HAVE_BDI_SETUP_AND_REGISTER */
 
 int
 zfs_domount(struct super_block *sb, void *data, int silent)
@@ -1175,17 +1133,6 @@ zfs_domount(struct super_block *sb, void *data, int silent)
 	uint64_t recordsize;
 	int error;
 
-	/*
-	 * Linux allows multiple vfs mounts per super block.  However, the
-	 * zfs_sb_t only contains a pointer for a single vfs mount.  This
-	 * back reference in the long term could be extended to a list of
-	 * vfs mounts if a hook were added to the kernel to notify us when
-	 * a vfsmount is destroyed.  Until then we must limit the number
-	 * of mounts per super block to one.
-	 */
-	if (atomic_read(&sb->s_active) > 1)
-		return (EBUSY);
-
 	error = zfs_sb_create(osname, &zsb);
 	if (error)
 		return (error);
@@ -1195,7 +1142,6 @@ zfs_domount(struct super_block *sb, void *data, int silent)
 		goto out;
 
 	zsb->z_sb = sb;
-	zsb->z_vfs = zmd->z_vfs;
 	sb->s_fs_info = zsb;
 	sb->s_magic = ZFS_SUPER_MAGIC;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
@@ -1203,12 +1149,27 @@ zfs_domount(struct super_block *sb, void *data, int silent)
 	sb->s_blocksize = recordsize;
 	sb->s_blocksize_bits = ilog2(recordsize);
 
+#ifdef HAVE_BDI
+	/*
+	 * 2.6.32 API change,
+	 * Added backing_device_info (BDI) per super block interfaces.  A BDI
+	 * must be configured when using a non-device backed filesystem for
+	 * proper writeback.  This is not required for older pdflush kernels.
+	 *
+	 * NOTE: Linux read-ahead is disabled in favor of zfs read-ahead.
+	 */
+	zsb->z_bdi.ra_pages = 0;
+	sb->s_bdi = &zsb->z_bdi;
+
+	error = -bdi_setup_and_register(&zsb->z_bdi, "zfs", BDI_CAP_MAP_COPY);
+	if (error)
+		goto out;
+#endif /* HAVE_BDI */
+
 	/* Set callback operations for the file system. */
 	sb->s_op = &zpl_super_operations;
 	sb->s_xattr = zpl_xattr_handlers;
-#ifdef HAVE_EXPORTS
-        sb->s_export_op = &zpl_export_operations;
-#endif /* HAVE_EXPORTS */
+	sb->s_export_op = &zpl_export_operations;
 
 	/* Set features for file system. */
 	zfs_set_fuid_feature(zsb);
@@ -1229,9 +1190,6 @@ zfs_domount(struct super_block *sb, void *data, int silent)
 		mutex_exit(&zsb->z_os->os_user_ptr_lock);
 	} else {
 		error = zfs_sb_setup(zsb, B_TRUE);
-#ifdef HAVE_SNAPSHOT
-		(void) zfs_snap_create(zsb);
-#endif /* HAVE_SNAPSHOT */
 	}
 
 	/* Allocate a root inode for the filesystem. */
@@ -1248,6 +1206,9 @@ zfs_domount(struct super_block *sb, void *data, int silent)
 		error = ENOMEM;
 		goto out;
 	}
+
+	if (!zsb->z_issnap)
+		zfsctl_create(zsb);
 out:
 	if (error) {
 		dmu_objset_disown(zsb->z_os, zsb);
@@ -1258,6 +1219,27 @@ out:
 }
 EXPORT_SYMBOL(zfs_domount);
 
+/*
+ * Called when an unmount is requested and certain sanity checks have
+ * already passed.  At this point no dentries or inodes have been reclaimed
+ * from their respective caches.  We drop the extra reference on the .zfs
+ * control directory to allow everything to be reclaimed.  All snapshots
+ * must already have been unmounted to reach this point.
+ */
+void
+zfs_preumount(struct super_block *sb)
+{
+	zfs_sb_t *zsb = sb->s_fs_info;
+
+	if (zsb != NULL && zsb->z_ctldir != NULL)
+		zfsctl_destroy(zsb);
+}
+EXPORT_SYMBOL(zfs_preumount);
+
+/*
+ * Called once all other unmount released tear down has occurred.
+ * It is our responsibility to release any remaining infrastructure.
+ */
 /*ARGSUSED*/
 int
 zfs_umount(struct super_block *sb)
@@ -1265,8 +1247,12 @@ zfs_umount(struct super_block *sb)
 	zfs_sb_t *zsb = sb->s_fs_info;
 	objset_t *os;
 
-	VERIFY(zfsvfs_teardown(zsb, B_TRUE) == 0);
+	VERIFY(zfs_sb_teardown(zsb, B_TRUE) == 0);
 	os = zsb->z_os;
+
+#ifdef HAVE_BDI
+	bdi_destroy(sb->s_bdi);
+#endif /* HAVE_BDI */
 
 	/*
 	 * z_os will be NULL if there was an error in
@@ -1294,47 +1280,18 @@ EXPORT_SYMBOL(zfs_umount);
 int
 zfs_remount(struct super_block *sb, int *flags, char *data)
 {
-	zfs_sb_t *zsb = sb->s_fs_info;
-	boolean_t readonly = B_FALSE;
-	boolean_t setuid = B_TRUE;
-	boolean_t exec = B_TRUE;
-	boolean_t devices = B_TRUE;
-	boolean_t atime = B_TRUE;
-
-	if (*flags & MS_RDONLY)
-		readonly = B_TRUE;
-
-	if (*flags & MS_NOSUID) {
-		devices = B_FALSE;
-		setuid = B_FALSE;
-	} else {
-		if (*flags & MS_NODEV)
-			devices = B_FALSE;
-	}
-
-	if (*flags & MS_NOEXEC)
-		exec = B_FALSE;
-
-	if (*flags & MS_NOATIME)
-		atime = B_FALSE;
-
 	/*
-	 * Invoke our callbacks to set required flags.
+	 * All namespace flags (MNT_*) and super block flags (MS_*) will
+	 * be handled by the Linux VFS.  Only handle custom options here.
 	 */
-	readonly_changed_cb(zsb, readonly);
-	setuid_changed_cb(zsb, setuid);
-	exec_changed_cb(zsb, exec);
-	devices_changed_cb(zsb, devices);
-	atime_changed_cb(zsb, atime);
-
 	return (0);
 }
 EXPORT_SYMBOL(zfs_remount);
 
 int
-zfs_vget(struct vfsmount *vfsp, struct inode **ipp, fid_t *fidp)
+zfs_vget(struct super_block *sb, struct inode **ipp, fid_t *fidp)
 {
-	zfs_sb_t	*zsb = VTOZSB(vfsp);
+	zfs_sb_t	*zsb = sb->s_fs_info;
 	znode_t		*zp;
 	uint64_t	object = 0;
 	uint64_t	fid_gen = 0;
@@ -1359,11 +1316,10 @@ zfs_vget(struct vfsmount *vfsp, struct inode **ipp, fid_t *fidp)
 
 		ZFS_EXIT(zsb);
 
-#ifdef HAVE_SNAPSHOT
-		err = zfsctl_lookup_objset(vfsp, objsetid, &zsb);
+		err = zfsctl_lookup_objset(sb, objsetid, &zsb);
 		if (err)
 			return (EINVAL);
-#endif /* HAVE_SNAPSHOT */
+
 		ZFS_ENTER(zsb);
 	}
 
@@ -1380,22 +1336,20 @@ zfs_vget(struct vfsmount *vfsp, struct inode **ipp, fid_t *fidp)
 		return (EINVAL);
 	}
 
-#ifdef HAVE_SNAPSHOT
 	/* A zero fid_gen means we are in the .zfs control directories */
 	if (fid_gen == 0 &&
 	    (object == ZFSCTL_INO_ROOT || object == ZFSCTL_INO_SNAPDIR)) {
 		*ipp = zsb->z_ctldir;
 		ASSERT(*ipp != NULL);
 		if (object == ZFSCTL_INO_SNAPDIR) {
-			VERIFY(zfsctl_root_lookup(*ipp, "snapshot", ipp, NULL,
-			    0, NULL, NULL, NULL, NULL, NULL) == 0);
+			VERIFY(zfsctl_root_lookup(*ipp, "snapshot", ipp,
+			    0, kcred, NULL, NULL) == 0);
 		} else {
 			igrab(*ipp);
 		}
 		ZFS_EXIT(zsb);
 		return (0);
 	}
-#endif /* HAVE_SNAPSHOT */
 
 	gen_mask = -1ULL >> (64 - 8 * i);
 
@@ -1436,7 +1390,7 @@ zfs_suspend_fs(zfs_sb_t *zsb)
 {
 	int error;
 
-	if ((error = zfsvfs_teardown(zsb, B_FALSE)) != 0)
+	if ((error = zfs_sb_teardown(zsb, B_FALSE)) != 0)
 		return (error);
 	dmu_objset_disown(zsb->z_os, zsb);
 
@@ -1616,13 +1570,16 @@ zfs_get_zplprop(objset_t *os, zfs_prop_t prop, uint64_t *value)
 	}
 	return (error);
 }
+EXPORT_SYMBOL(zfs_get_zplprop);
 
 void
 zfs_init(void)
 {
+	zfsctl_init();
 	zfs_znode_init();
 	dmu_objset_register_type(DMU_OST_ZFS, zfs_space_delta_cb);
 	register_filesystem(&zpl_fs_type);
+	(void) arc_add_prune_callback(zpl_prune_sbs, NULL);
 }
 
 void
@@ -1630,4 +1587,5 @@ zfs_fini(void)
 {
 	unregister_filesystem(&zpl_fs_type);
 	zfs_znode_fini();
+	zfsctl_fini();
 }

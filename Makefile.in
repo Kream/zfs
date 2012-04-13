@@ -15,6 +15,12 @@
 
 @SET_MAKE@
 
+###############################################################################
+# Written by Prakash Surya <surya1@llnl.gov>
+###############################################################################
+# Build targets for RPM packages.
+###############################################################################
+
 VPATH = @srcdir@
 pkgdatadir = $(datadir)/@PACKAGE@
 pkgincludedir = $(includedir)/@PACKAGE@
@@ -37,11 +43,13 @@ host_triplet = @host@
 target_triplet = @target@
 DIST_COMMON = $(am__configure_deps) $(noinst_HEADERS) \
 	$(srcdir)/Makefile.am $(srcdir)/Makefile.in \
+	$(srcdir)/PKGBUILD-zfs-modules.in $(srcdir)/PKGBUILD-zfs.in \
 	$(srcdir)/zfs-modules.spec.in \
 	$(srcdir)/zfs-script-config.sh.in $(srcdir)/zfs.spec.in \
-	$(srcdir)/zfs_config.h.in $(top_srcdir)/config/deb.am \
-	$(top_srcdir)/config/rpm.am $(top_srcdir)/config/tgz.am \
-	$(top_srcdir)/configure $(top_srcdir)/module/Makefile.in \
+	$(srcdir)/zfs_config.h.in $(top_srcdir)/config/arch.am \
+	$(top_srcdir)/config/deb.am $(top_srcdir)/config/rpm.am \
+	$(top_srcdir)/config/tgz.am $(top_srcdir)/configure \
+	$(top_srcdir)/module/Makefile.in \
 	$(top_srcdir)/module/avl/Makefile.in \
 	$(top_srcdir)/module/nvpair/Makefile.in \
 	$(top_srcdir)/module/unicode/Makefile.in \
@@ -53,29 +61,49 @@ DIST_COMMON = $(am__configure_deps) $(noinst_HEADERS) \
 subdir = .
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps =  \
+	$(top_srcdir)/config/always-no-unused-but-set-variable.m4 \
+	$(top_srcdir)/config/kernel-automount.m4 \
 	$(top_srcdir)/config/kernel-bdev-block-device-operations.m4 \
 	$(top_srcdir)/config/kernel-bdev-logical-size.m4 \
+	$(top_srcdir)/config/kernel-bdi-setup-and-register.m4 \
+	$(top_srcdir)/config/kernel-bdi.m4 \
 	$(top_srcdir)/config/kernel-bio-empty-barrier.m4 \
 	$(top_srcdir)/config/kernel-bio-end-io-t-args.m4 \
 	$(top_srcdir)/config/kernel-bio-failfast.m4 \
 	$(top_srcdir)/config/kernel-bio-rw-syncio.m4 \
 	$(top_srcdir)/config/kernel-blk-end-request.m4 \
 	$(top_srcdir)/config/kernel-blk-fetch-request.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-discard.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-flush.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-io-opt.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-max-hw-sectors.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-max-segments.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-nonrot.m4 \
+	$(top_srcdir)/config/kernel-blk-queue-physical-block-size.m4 \
 	$(top_srcdir)/config/kernel-blk-requeue-request.m4 \
 	$(top_srcdir)/config/kernel-blk-rq-bytes.m4 \
 	$(top_srcdir)/config/kernel-blk-rq-pos.m4 \
 	$(top_srcdir)/config/kernel-blk-rq-sectors.m4 \
 	$(top_srcdir)/config/kernel-blkdev-get-by-path.m4 \
+	$(top_srcdir)/config/kernel-check-disk-size-change.m4 \
+	$(top_srcdir)/config/kernel-d-obtain-alias.m4 \
 	$(top_srcdir)/config/kernel-evict-inode.m4 \
+	$(top_srcdir)/config/kernel-fallocate.m4 \
 	$(top_srcdir)/config/kernel-fmode-t.m4 \
 	$(top_srcdir)/config/kernel-fsync.m4 \
 	$(top_srcdir)/config/kernel-get-disk-ro.m4 \
 	$(top_srcdir)/config/kernel-insert-inode-locked.m4 \
 	$(top_srcdir)/config/kernel-invalidate-bdev-args.m4 \
 	$(top_srcdir)/config/kernel-kobj-name-len.m4 \
+	$(top_srcdir)/config/kernel-mount-nodev.m4 \
 	$(top_srcdir)/config/kernel-open-bdev-exclusive.m4 \
 	$(top_srcdir)/config/kernel-rq-for-each_segment.m4 \
 	$(top_srcdir)/config/kernel-rq-is_sync.m4 \
+	$(top_srcdir)/config/kernel-security-inode-init.m4 \
+	$(top_srcdir)/config/kernel-set-nlink.m4 \
+	$(top_srcdir)/config/kernel-show-options.m4 \
+	$(top_srcdir)/config/kernel-shrink.m4 \
+	$(top_srcdir)/config/kernel-truncate-setsize.m4 \
 	$(top_srcdir)/config/kernel-xattr-handler.m4 \
 	$(top_srcdir)/config/kernel.m4 \
 	$(top_srcdir)/config/user-arch.m4 \
@@ -85,6 +113,7 @@ am__aclocal_m4_deps =  \
 	$(top_srcdir)/config/user-libuuid.m4 \
 	$(top_srcdir)/config/user-nptl_guard_within_stack.m4 \
 	$(top_srcdir)/config/user-selinux.m4 \
+	$(top_srcdir)/config/user-udev.m4 \
 	$(top_srcdir)/config/user-zlib.m4 $(top_srcdir)/config/user.m4 \
 	$(top_srcdir)/config/zfs-build.m4 \
 	$(top_srcdir)/config/zfs-meta.m4 $(top_srcdir)/configure.ac
@@ -97,8 +126,8 @@ CONFIG_HEADER = zfs_config.h
 CONFIG_CLEAN_FILES = module/Makefile module/avl/Makefile \
 	module/nvpair/Makefile module/unicode/Makefile \
 	module/zcommon/Makefile module/zfs/Makefile \
-	module/zpios/Makefile zfs.spec zfs-modules.spec \
-	zfs-script-config.sh
+	module/zpios/Makefile zfs.spec zfs-modules.spec PKGBUILD-zfs \
+	PKGBUILD-zfs-modules zfs-script-config.sh
 CONFIG_CLEAN_VPATH_FILES =
 AM_V_GEN = $(am__v_GEN_$(V))
 am__v_GEN_ = $(am__v_GEN_$(AM_DEFAULT_VERBOSITY))
@@ -123,7 +152,7 @@ AM_RECURSIVE_TARGETS = $(RECURSIVE_TARGETS:-recursive=) \
 	distdir dist dist-all distcheck
 ETAGS = etags
 CTAGS = ctags
-DIST_SUBDIRS = dracut etc man scripts lib cmd module include
+DIST_SUBDIRS = dracut udev etc man scripts lib cmd module include
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
 distdir = $(PACKAGE)-$(VERSION)
 top_distdir = $(distdir)
@@ -180,7 +209,10 @@ CPP = @CPP@
 CPPFLAGS = @CPPFLAGS@
 CYGPATH_W = @CYGPATH_W@
 DEBUG_CFLAGS = @DEBUG_CFLAGS@
+DEBUG_DMU_TX = @DEBUG_DMU_TX@
 DEBUG_STACKFLAGS = @DEBUG_STACKFLAGS@
+DEBUG_ZFS = @DEBUG_ZFS@
+DEFAULT_INIT_DIR = @DEFAULT_INIT_DIR@
 DEFAULT_INIT_SCRIPT = @DEFAULT_INIT_SCRIPT@
 DEFAULT_PACKAGE = @DEFAULT_PACKAGE@
 DEFS = @DEFS@
@@ -202,6 +234,8 @@ GREP = @GREP@
 HAVE_ALIEN = @HAVE_ALIEN@
 HAVE_DPKG = @HAVE_DPKG@
 HAVE_DPKGBUILD = @HAVE_DPKGBUILD@
+HAVE_MAKEPKG = @HAVE_MAKEPKG@
+HAVE_PACMAN = @HAVE_PACMAN@
 HAVE_RPM = @HAVE_RPM@
 HAVE_RPMBUILD = @HAVE_RPMBUILD@
 INSTALL = @INSTALL@
@@ -228,9 +262,12 @@ LN_S = @LN_S@
 LTLIBOBJS = @LTLIBOBJS@
 MAINT = @MAINT@
 MAKEINFO = @MAKEINFO@
+MAKEPKG = @MAKEPKG@
+MAKEPKG_VERSION = @MAKEPKG_VERSION@
 MKDIR_P = @MKDIR_P@
 NM = @NM@
 NMEDIT = @NMEDIT@
+NO_UNUSED_BUT_SET_VARIABLE = @NO_UNUSED_BUT_SET_VARIABLE@
 OBJDUMP = @OBJDUMP@
 OBJEXT = @OBJEXT@
 OTOOL = @OTOOL@
@@ -241,6 +278,8 @@ PACKAGE_NAME = @PACKAGE_NAME@
 PACKAGE_STRING = @PACKAGE_STRING@
 PACKAGE_TARNAME = @PACKAGE_TARNAME@
 PACKAGE_VERSION = @PACKAGE_VERSION@
+PACMAN = @PACMAN@
+PACMAN_VERSION = @PACMAN_VERSION@
 PATH_SEPARATOR = @PATH_SEPARATOR@
 RANLIB = @RANLIB@
 RPM = @RPM@
@@ -326,7 +365,9 @@ target_vendor = @target_vendor@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
-@CONFIG_USER_TRUE@USER_DIR = dracut etc man scripts lib cmd
+udevdir = @udevdir@
+udevruledir = @udevruledir@
+@CONFIG_USER_TRUE@USER_DIR = dracut udev etc man scripts lib cmd
 @CONFIG_KERNEL_TRUE@KERNEL_DIR = module
 SUBDIRS = $(USER_DIR) $(KERNEL_DIR) include
 AUTOMAKE_OPTIONS = foreign
@@ -341,7 +382,7 @@ all: zfs_config.h
 .SUFFIXES:
 am--refresh:
 	@:
-$(srcdir)/Makefile.in: @MAINTAINER_MODE_TRUE@ $(srcdir)/Makefile.am $(top_srcdir)/config/rpm.am $(top_srcdir)/config/deb.am $(top_srcdir)/config/tgz.am $(am__configure_deps)
+$(srcdir)/Makefile.in: @MAINTAINER_MODE_TRUE@ $(srcdir)/Makefile.am $(top_srcdir)/config/rpm.am $(top_srcdir)/config/deb.am $(top_srcdir)/config/tgz.am $(top_srcdir)/config/arch.am $(am__configure_deps)
 	@for dep in $?; do \
 	  case '$(am__configure_deps)' in \
 	    *$$dep*) \
@@ -407,6 +448,10 @@ module/zpios/Makefile: $(top_builddir)/config.status $(top_srcdir)/module/zpios/
 zfs.spec: $(top_builddir)/config.status $(srcdir)/zfs.spec.in
 	cd $(top_builddir) && $(SHELL) ./config.status $@
 zfs-modules.spec: $(top_builddir)/config.status $(srcdir)/zfs-modules.spec.in
+	cd $(top_builddir) && $(SHELL) ./config.status $@
+PKGBUILD-zfs: $(top_builddir)/config.status $(srcdir)/PKGBUILD-zfs.in
+	cd $(top_builddir) && $(SHELL) ./config.status $@
+PKGBUILD-zfs-modules: $(top_builddir)/config.status $(srcdir)/PKGBUILD-zfs-modules.in
 	cd $(top_builddir) && $(SHELL) ./config.status $@
 zfs-script-config.sh: $(top_builddir)/config.status $(srcdir)/zfs-script-config.sh.in
 	cd $(top_builddir) && $(SHELL) ./config.status $@
@@ -919,6 +964,8 @@ rpm-common:
 		--define "require_spldir $(SPL)" \
 		--define "require_splobj $(SPL_OBJ)" \
 		--define "require_splver $(SPL_VERSION)" \
+		--define "$(DEBUG_ZFS) 1" \
+		--define "$(DEBUG_DMU_TX) 1" \
 		--nodeps --rebuild $$rpmpkg || exit 1; \
 	cp $$rpmbuild/RPMS/*/* . || exit 1; \
 	$(RM) -R $$rpmbuild
@@ -942,7 +989,7 @@ deb-modules: deb-local rpm-modules
 	name=${PACKAGE}-modules; \
 	version=${ZFS_META_VERSION}-${ZFS_META_RELEASE}; \
 	release=`echo ${LINUX_VERSION} | $(SED) -e "s/-/_/g"`; \
-	arch=`$(RPM) -qp $${name}-$${version}.src.rpm --qf %{arch}`; \
+	arch=`$(RPM) -qp $${name}-$${version}.src.rpm --qf %{arch} | tail -1`; \
 	pkg1=$${name}-$${version}_$${release}.$${arch}.rpm; \
 	pkg2=$${name}-devel-$${version}_$${release}.$${arch}.rpm; \
 	fakeroot $(ALIEN) --scripts --to-deb $$pkg1 $$pkg2; \
@@ -951,7 +998,7 @@ deb-modules: deb-local rpm-modules
 deb-utils: deb-local rpm-utils
 	name=${PACKAGE}; \
 	version=${ZFS_META_VERSION}-${ZFS_META_RELEASE}; \
-	arch=`$(RPM) -qp $${name}-$${version}.src.rpm --qf %{arch}`; \
+	arch=`$(RPM) -qp $${name}-$${version}.src.rpm --qf %{arch} | tail -1`; \
 	pkg1=$${name}-$${version}.$${arch}.rpm; \
 	pkg2=$${name}-devel-$${version}.$${arch}.rpm; \
 	pkg3=$${name}-test-$${version}.$${arch}.rpm; \
@@ -973,7 +1020,7 @@ tgz-modules: tgz-local rpm-modules
 	name=${PACKAGE}-modules; \
 	version=${ZFS_META_VERSION}-${ZFS_META_RELEASE}; \
 	release=`echo ${LINUX_VERSION} | $(SED) -e "s/-/_/g"`; \
-	arch=`$(RPM) -qp $${name}-$${version}.src.rpm --qf %{arch}`; \
+	arch=`$(RPM) -qp $${name}-$${version}.src.rpm --qf %{arch} | tail -1`; \
 	pkg1=$${name}-$${version}_$${release}.$${arch}.rpm; \
 	pkg2=$${name}-devel-$${version}_$${release}.$${arch}.rpm; \
 	fakeroot $(ALIEN) --scripts --to-tgz $$pkg1 $$pkg2; \
@@ -982,7 +1029,7 @@ tgz-modules: tgz-local rpm-modules
 tgz-utils: tgz-local rpm-utils
 	name=${PACKAGE}; \
 	version=${ZFS_META_VERSION}-${ZFS_META_RELEASE}; \
-	arch=`$(RPM) -qp $${name}-$${version}.src.rpm --qf %{arch}`; \
+	arch=`$(RPM) -qp $${name}-$${version}.src.rpm --qf %{arch} | tail -1`; \
 	pkg1=$${name}-$${version}.$${arch}.rpm; \
 	pkg2=$${name}-devel-$${version}.$${arch}.rpm; \
 	pkg3=$${name}-test-$${version}.$${arch}.rpm; \
@@ -990,6 +1037,41 @@ tgz-utils: tgz-local rpm-utils
 	$(RM) $$pkg1 $$pkg2 $$pkg3
 
 tgz: tgz-modules tgz-utils
+
+sarch-modules:
+	$(MAKE) $(AM_MAKEFLAGS) pkg="${PACKAGE}-modules" sarch-common
+
+sarch-utils:
+	$(MAKE) $(AM_MAKEFLAGS) pkg="${PACKAGE}" sarch-common
+
+sarch: sarch-modules sarch-utils
+
+arch-modules:
+	$(MAKE) $(AM_MAKEFLAGS) pkg="${PACKAGE}-modules" arch-common
+
+arch-utils:
+	$(MAKE) $(AM_MAKEFLAGS) pkg="${PACKAGE}" arch-common
+
+arch: arch-modules arch-utils
+
+arch-local:
+	@(if test "${HAVE_MAKEPKG}" = "no"; then \
+		echo -e "\n" \
+	"*** Required util ${MAKEPKG} missing.  Please install the\n" \
+	"*** package for your distribution which provides ${MAKEPKG},\n" \
+	"*** re-run configure, and try again.\n"; \
+		exit 1; \
+	fi;)
+
+sarch-common: dist
+	pkgbuild=PKGBUILD-$(pkg); \
+	$(MAKE) $(AM_MAKEFLAGS) arch-local || exit 1; \
+	$(MAKEPKG) --allsource --skipinteg --nodeps -p $$pkgbuild || exit 1;
+
+arch-common: dist
+	pkgbuild=PKGBUILD-$(pkg); \
+	$(MAKE) $(AM_MAKEFLAGS) arch-local || exit 1; \
+	$(MAKEPKG) --skipinteg -p $$pkgbuild || exit 1;
 
 distclean-local::
 	-$(RM) -R autom4te*.cache
@@ -1004,9 +1086,9 @@ distclean-local::
 		-type f -print | xargs $(RM)
 
 @CONFIG_KERNEL_TRUE@install-data-local:
-@CONFIG_KERNEL_TRUE@	destname=zfs-$(ZFS_META_VERSION)/$(LINUX_VERSION); \
-@CONFIG_KERNEL_TRUE@	instdest=$(DESTDIR)/usr/src/$$destname; \
-@CONFIG_KERNEL_TRUE@	echo "$(ZFS_META_VERSION)" >$$instdest/zfs.release; \
+@CONFIG_KERNEL_TRUE@	release=$(ZFS_META_VERSION)-$(ZFS_META_RELEASE); \
+@CONFIG_KERNEL_TRUE@	instdest=$(DESTDIR)/usr/src/zfs-$$release/$(LINUX_VERSION); \
+@CONFIG_KERNEL_TRUE@	echo "$$release" >$$instdest/zfs.release; \
 @CONFIG_KERNEL_TRUE@	for instfile in $(noinst_HEADERS) module/$(LINUX_SYMBOLS); do \
 @CONFIG_KERNEL_TRUE@		$(INSTALL) -D $$instfile $$instdest/$$instfile; \
 @CONFIG_KERNEL_TRUE@	done

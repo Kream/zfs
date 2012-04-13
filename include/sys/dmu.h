@@ -643,6 +643,7 @@ extern uint64_t dmu_objset_syncprop(objset_t *os);
 extern uint64_t dmu_objset_logbias(objset_t *os);
 extern int dmu_snapshot_list_next(objset_t *os, int namelen, char *name,
     uint64_t *id, uint64_t *offp, boolean_t *case_conflict);
+extern int dmu_snapshot_id(objset_t *os, const char *snapname, uint64_t *idp);
 extern int dmu_snapshot_realname(objset_t *os, char *name, char *real,
     int maxlen, boolean_t *conflict);
 extern int dmu_dir_list_next(objset_t *os, int namelen, char *name,
@@ -721,6 +722,7 @@ typedef struct dmu_recv_cookie {
 	char *drc_top_ds;
 	boolean_t drc_newfs;
 	boolean_t drc_force;
+	struct avl_tree *drc_guid_to_ds_map;
 } dmu_recv_cookie_t;
 
 int dmu_recv_begin(char *tofs, char *tosnap, char *topds, struct drr_begin *,

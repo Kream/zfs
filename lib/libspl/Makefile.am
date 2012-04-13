@@ -11,9 +11,7 @@ DEFAULT_INCLUDES += \
 AM_CCASFLAGS = \
 	-I$(top_srcdir)/lib/libspl/include
 
-lib_LTLIBRARIES = libspl.la
-
-libspl_la_LDFLAGS = -lrt
+noinst_LTLIBRARIES = libspl.la
 
 libspl_la_SOURCES = \
 	$(top_srcdir)/lib/libspl/getexecname.c \
@@ -31,3 +29,5 @@ libspl_la_SOURCES = \
 	$(top_srcdir)/lib/libspl/$(TARGET_ASM_DIR)/atomic.S \
 	$(top_srcdir)/lib/libspl/include/sys/list.h \
 	$(top_srcdir)/lib/libspl/include/sys/list_impl.h
+
+libspl_la_LDFLAGS = -lrt

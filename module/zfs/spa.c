@@ -22,6 +22,9 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  */
+/*
+ * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
+ */
 
 /*
  * This file contains all the routines used when modifying on-disk SPA state.
@@ -107,7 +110,7 @@ const zio_taskq_info_t zio_taskqs[ZIO_TYPES][ZIO_TASKQ_TYPES] = {
 	{ ZTI_ONE,	ZTI_NULL,	ZTI_ONE,	ZTI_NULL },
 	{ ZTI_FIX(8),	ZTI_NULL,	ZTI_BATCH,	ZTI_NULL },
 	{ ZTI_BATCH,	ZTI_FIX(5),	ZTI_FIX(16),	ZTI_FIX(5) },
-	{ ZTI_FIX(100),	ZTI_NULL,	ZTI_ONE,	ZTI_NULL },
+	{ ZTI_PCT(100),	ZTI_NULL,	ZTI_ONE,	ZTI_NULL },
 	{ ZTI_ONE,	ZTI_NULL,	ZTI_ONE,	ZTI_NULL },
 	{ ZTI_ONE,	ZTI_NULL,	ZTI_ONE,	ZTI_NULL },
 };
@@ -614,9 +617,8 @@ spa_get_errlists(spa_t *spa, avl_tree_t *last, avl_tree_t *scrub)
 
 static taskq_t *
 spa_taskq_create(spa_t *spa, const char *name, enum zti_modes mode,
-    uint_t value)
+    uint_t value, uint_t flags)
 {
-	uint_t flags = TASKQ_PREPOPULATE;
 	boolean_t batch = B_FALSE;
 
 	switch (mode) {
@@ -666,13 +668,17 @@ spa_create_zio_taskqs(spa_t *spa)
 			const zio_taskq_info_t *ztip = &zio_taskqs[t][q];
 			enum zti_modes mode = ztip->zti_mode;
 			uint_t value = ztip->zti_value;
+			uint_t flags = 0;
 			char name[32];
+
+			if (t == ZIO_TYPE_WRITE)
+				flags |= TASKQ_NORECLAIM;
 
 			(void) snprintf(name, sizeof (name),
 			    "%s_%s", zio_type_name[t], zio_taskq_types[q]);
 
 			spa->spa_zio_taskq[t][q] =
-			    spa_taskq_create(spa, name, mode, value);
+			    spa_taskq_create(spa, name, mode, value, flags);
 		}
 	}
 }
@@ -1001,8 +1007,10 @@ spa_unload(spa_t *spa)
 	}
 	spa->spa_spares.sav_count = 0;
 
-	for (i = 0; i < spa->spa_l2cache.sav_count; i++)
+	for (i = 0; i < spa->spa_l2cache.sav_count; i++) {
+		vdev_clear_stats(spa->spa_l2cache.sav_vdevs[i]);
 		vdev_free(spa->spa_l2cache.sav_vdevs[i]);
+	}
 	if (spa->spa_l2cache.sav_vdevs) {
 		kmem_free(spa->spa_l2cache.sav_vdevs,
 		    spa->spa_l2cache.sav_count * sizeof (void *));
@@ -1225,11 +1233,13 @@ spa_load_l2cache(spa_t *spa)
 
 		vd = oldvdevs[i];
 		if (vd != NULL) {
+			ASSERT(vd->vdev_isl2cache);
+
 			if (spa_l2cache_exists(vd->vdev_guid, &pool) &&
 			    pool != 0ULL && l2arc_vdev_present(vd))
 				l2arc_remove_vdev(vd);
-			(void) vdev_close(vd);
-			spa_l2cache_remove(vd);
+			vdev_clear_stats(vd);
+			vdev_free(vd);
 		}
 	}
 
@@ -1973,7 +1983,7 @@ spa_load_impl(spa_t *spa, uint64_t pool_guid, nvlist_t *config,
 				cmn_err(CE_WARN, "pool '%s' could not be "
 				    "loaded as it was last accessed by "
 				    "another system (host: %s hostid: 0x%lx). "
-				    "See: http://www.sun.com/msg/ZFS-8000-EY",
+				    "See: http://zfsonlinux.org/msg/ZFS-8000-EY",
 				    spa_name(spa), hostname,
 				    (unsigned long)hostid);
 				return (EBADF);
@@ -2737,6 +2747,7 @@ spa_validate_aux_devs(spa_t *spa, nvlist_t *nvroot, uint64_t crtxg, int mode,
 		if ((strcmp(config, ZPOOL_CONFIG_L2CACHE) == 0) &&
 		    strcmp(vd->vdev_ops->vdev_op_type, VDEV_TYPE_DISK) != 0) {
 			error = ENOTBLK;
+			vdev_free(vd);
 			goto out;
 		}
 #endif
@@ -2846,10 +2857,6 @@ spa_l2cache_drop(spa_t *spa)
 		if (spa_l2cache_exists(vd->vdev_guid, &pool) &&
 		    pool != 0ULL && l2arc_vdev_present(vd))
 			l2arc_remove_vdev(vd);
-		if (vd->vdev_isl2cache)
-			spa_l2cache_remove(vd);
-		vdev_clear_stats(vd);
-		(void) vdev_close(vd);
 	}
 }
 
@@ -3845,7 +3852,7 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 	pvd = oldvd->vdev_parent;
 
 	if ((error = spa_config_parse(spa, &newrootvd, nvroot, NULL, 0,
-	    VDEV_ALLOC_ADD)) != 0)
+	    VDEV_ALLOC_ATTACH)) != 0)
 		return (spa_vdev_exit(spa, NULL, txg, EINVAL));
 
 	if (newrootvd->vdev_children != 1)

@@ -20,6 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -232,21 +233,6 @@ static avl_tree_t spa_l2cache_avl;
 
 kmem_cache_t *spa_buffer_pool;
 int spa_mode_global;
-
-#ifdef ZFS_DEBUG
-/* Everything except dprintf is on by default in debug builds */
-int zfs_flags = ~ZFS_DEBUG_DPRINTF;
-#else
-int zfs_flags = 0;
-#endif
-
-/*
- * zfs_recover can be set to nonzero to attempt to recover from
- * otherwise-fatal errors, typically caused by on-disk corruption.  When
- * set, calls to zfs_panic_recover() will turn into warning messages.
- */
-int zfs_recover = 0;
-
 
 /*
  * ==========================================================================
@@ -1216,16 +1202,6 @@ spa_freeze(spa_t *spa)
 		txg_wait_synced(spa_get_dsl(spa), freeze_txg);
 }
 
-void
-zfs_panic_recover(const char *fmt, ...)
-{
-	va_list adx;
-
-	va_start(adx, fmt);
-	vcmn_err(zfs_recover ? CE_WARN : CE_PANIC, fmt, adx);
-	va_end(adx);
-}
-
 /*
  * This is a stripped-down version of strtoull, suitable only for converting
  * lowercase hexidecimal numbers that don't overflow.
@@ -1678,6 +1654,12 @@ spa_scan_get_stats(spa_t *spa, pool_scan_stat_t *ps)
 	ps->pss_pass_exam = spa->spa_scan_pass_exam;
 
 	return (0);
+}
+
+boolean_t
+spa_debug_enabled(spa_t *spa)
+{
+	return (spa->spa_debug);
 }
 
 #if defined(_KERNEL) && defined(HAVE_SPL)

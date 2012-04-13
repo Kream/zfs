@@ -21,6 +21,8 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2010 Nexenta Systems, Inc. All rights reserved.
+ * Copyright (c) 2011 by Delphix. All rights reserved.
  */
 
 #include <ctype.h>
@@ -94,6 +96,7 @@ zfs_validate_name(libzfs_handle_t *hdl, const char *path, int type,
 	namecheck_err_t why;
 	char what;
 
+	(void) zfs_prop_get_table();
 	if (dataset_namecheck(path, &why, &what) != 0) {
 		if (hdl != NULL) {
 			switch (why) {
@@ -410,6 +413,9 @@ make_dataset_handle_common(zfs_handle_t *zhp, zfs_cmd_t *zc)
 		zhp->zfs_head_type = ZFS_TYPE_VOLUME;
 	else if (zhp->zfs_dmustats.dds_type == DMU_OST_ZFS)
 		zhp->zfs_head_type = ZFS_TYPE_FILESYSTEM;
+	else if (zhp->zfs_dmustats.dds_type == DMU_OST_OTHER)
+		return (-1); /* zpios' and other testing datasets are
+		                of this type, ignore if encountered */
 	else
 		abort();
 
@@ -1313,6 +1319,25 @@ zfs_setprop_error(libzfs_handle_t *hdl, zfs_prop_t prop, int err,
 	}
 }
 
+static boolean_t
+zfs_is_namespace_prop(zfs_prop_t prop)
+{
+	switch (prop) {
+
+	case ZFS_PROP_ATIME:
+	case ZFS_PROP_DEVICES:
+	case ZFS_PROP_EXEC:
+	case ZFS_PROP_SETUID:
+	case ZFS_PROP_READONLY:
+	case ZFS_PROP_XATTR:
+	case ZFS_PROP_NBMAND:
+		return (B_TRUE);
+
+	default:
+		return (B_FALSE);
+	}
+}
+
 /*
  * Given a property name and value, set the property for the given dataset.
  */
@@ -1408,12 +1433,22 @@ zfs_prop_set(zfs_handle_t *zhp, const char *propname, const char *propval)
 		if (do_prefix)
 			ret = changelist_postfix(cl);
 
-		/*
-		 * Refresh the statistics so the new property value
-		 * is reflected.
-		 */
-		if (ret == 0)
+		if (ret == 0) {
+			/*
+			 * Refresh the statistics so the new property
+			 * value is reflected.
+			 */
 			(void) get_stats(zhp);
+
+			/*
+			 * Remount the filesystem to propagate the change
+			 * if one of the options handled by the generic
+			 * Linux namespace layer has been modified.
+			 */
+			if (zfs_is_namespace_prop(prop) &&
+			    zfs_is_mounted(zhp, NULL))
+				ret = zfs_mount(zhp, MNTOPT_REMOUNT, 0);
+		}
 	}
 
 error:
@@ -1530,7 +1565,7 @@ error:
  * True DSL properties are stored in an nvlist.  The following two functions
  * extract them appropriately.
  */
-static uint64_t
+uint64_t
 getprop_uint64(zfs_handle_t *zhp, zfs_prop_t prop, char **source)
 {
 	nvlist_t *nv;
@@ -1996,6 +2031,7 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 		}
 		break;
 
+	case ZFS_PROP_REFRATIO:
 	case ZFS_PROP_COMPRESSRATIO:
 		if (get_numeric_property(zhp, prop, src, &source, &val) != 0)
 			return (-1);
@@ -2216,15 +2252,19 @@ out:
  * convert the propname into parameters needed by kernel
  * Eg: userquota@ahrens -> ZFS_PROP_USERQUOTA, "", 126829
  * Eg: userused@matt@domain -> ZFS_PROP_USERUSED, "S-1-123-456", 789
+ * Eg: groupquota@staff -> ZFS_PROP_GROUPQUOTA, "", 1234
+ * Eg: groupused@staff -> ZFS_PROP_GROUPUSED, "", 1234
  */
 static int
 userquota_propname_decode(const char *propname, boolean_t zoned,
     zfs_userquota_prop_t *typep, char *domain, int domainlen, uint64_t *ridp)
 {
 	zfs_userquota_prop_t type;
-	char *cp, *end;
-	char *numericsid = NULL;
+	char *cp;
 	boolean_t isuser;
+	boolean_t isgroup;
+	struct passwd *pw;
+	struct group *gr;
 
 	domain[0] = '\0';
 
@@ -2238,18 +2278,29 @@ userquota_propname_decode(const char *propname, boolean_t zoned,
 		return (EINVAL);
 	*typep = type;
 
-	isuser = (type == ZFS_PROP_USERQUOTA ||
-	    type == ZFS_PROP_USERUSED);
+	isuser = (type == ZFS_PROP_USERQUOTA || type == ZFS_PROP_USERUSED);
+	isgroup = (type == ZFS_PROP_GROUPQUOTA || type == ZFS_PROP_GROUPUSED);
 
 	cp = strchr(propname, '@') + 1;
 
-	if (strchr(cp, '@')) {
+	if (isuser && (pw = getpwnam(cp)) != NULL) {
+		if (zoned && getzoneid() == GLOBAL_ZONEID)
+			return (ENOENT);
+		*ridp = pw->pw_uid;
+	} else if (isgroup && (gr = getgrnam(cp)) != NULL) {
+		if (zoned && getzoneid() == GLOBAL_ZONEID)
+			return (ENOENT);
+		*ridp = gr->gr_gid;
+	} else if (strchr(cp, '@')) {
 #ifdef HAVE_IDMAP
 		/*
 		 * It's a SID name (eg "user@domain") that needs to be
 		 * turned into S-1-domainID-RID.
 		 */
 		directory_error_t e;
+		char *numericsid = NULL;
+		char *end;
+
 		if (zoned && getzoneid() == GLOBAL_ZONEID)
 			return (ENOENT);
 		if (isuser) {
@@ -2266,14 +2317,6 @@ userquota_propname_decode(const char *propname, boolean_t zoned,
 		if (numericsid == NULL)
 			return (ENOENT);
 		cp = numericsid;
-		/* will be further decoded below */
-#else
-		return (ENOSYS);
-#endif /* HAVE_IDMAP */
-	}
-
-	if (strncmp(cp, "S-1-", 4) == 0) {
-		/* It's a numeric SID (eg "S-1-234-567-89") */
 		(void) strlcpy(domain, cp, domainlen);
 		cp = strrchr(domain, '-');
 		*cp = '\0';
@@ -2281,39 +2324,22 @@ userquota_propname_decode(const char *propname, boolean_t zoned,
 
 		errno = 0;
 		*ridp = strtoull(cp, &end, 10);
-		if (numericsid) {
-			free(numericsid);
-			numericsid = NULL;
-		}
+		free(numericsid);
+
 		if (errno != 0 || *end != '\0')
 			return (EINVAL);
-	} else if (!isdigit(*cp)) {
-		/*
-		 * It's a user/group name (eg "user") that needs to be
-		 * turned into a uid/gid
-		 */
-		if (zoned && getzoneid() == GLOBAL_ZONEID)
-			return (ENOENT);
-		if (isuser) {
-			struct passwd *pw;
-			pw = getpwnam(cp);
-			if (pw == NULL)
-				return (ENOENT);
-			*ridp = pw->pw_uid;
-		} else {
-			struct group *gr;
-			gr = getgrnam(cp);
-			if (gr == NULL)
-				return (ENOENT);
-			*ridp = gr->gr_gid;
-		}
+#else
+		return (ENOSYS);
+#endif /* HAVE_IDMAP */
 	} else {
 #ifdef HAVE_IDMAP
 		/* It's a user/group ID (eg "12345"). */
-		uid_t id = strtoul(cp, &end, 10);
+		uid_t id;
 		idmap_rid_t rid;
 		char *mapdomain;
+		char *end;
 
+		id = strtoul(cp, &end, 10);
 		if (*end != '\0')
 			return (EINVAL);
 		if (id > MAXUID) {
@@ -2331,7 +2357,6 @@ userquota_propname_decode(const char *propname, boolean_t zoned,
 #endif /* HAVE_IDMAP */
 	}
 
-	ASSERT3P(numericsid, ==, NULL);
 	return (0);
 }
 
@@ -4280,6 +4305,193 @@ zfs_release(zfs_handle_t *zhp, const char *snapname, const char *tag,
 	}
 
 	return (0);
+}
+
+int
+zfs_get_fsacl(zfs_handle_t *zhp, nvlist_t **nvl)
+{
+	zfs_cmd_t zc = { "\0", "\0", "\0", "\0", 0 };
+	libzfs_handle_t *hdl = zhp->zfs_hdl;
+	int nvsz = 2048;
+	void *nvbuf;
+	int err = 0;
+	char errbuf[ZFS_MAXNAMELEN+32];
+
+	assert(zhp->zfs_type == ZFS_TYPE_VOLUME ||
+	    zhp->zfs_type == ZFS_TYPE_FILESYSTEM);
+
+tryagain:
+
+	nvbuf = malloc(nvsz);
+	if (nvbuf == NULL) {
+		err = (zfs_error(hdl, EZFS_NOMEM, strerror(errno)));
+		goto out;
+	}
+
+	zc.zc_nvlist_dst_size = nvsz;
+	zc.zc_nvlist_dst = (uintptr_t)nvbuf;
+
+	(void) strlcpy(zc.zc_name, zhp->zfs_name, ZFS_MAXNAMELEN);
+
+	if (zfs_ioctl(hdl, ZFS_IOC_GET_FSACL, &zc) != 0) {
+		(void) snprintf(errbuf, sizeof (errbuf),
+		    dgettext(TEXT_DOMAIN, "cannot get permissions on '%s'"),
+		    zc.zc_name);
+		switch (errno) {
+		case ENOMEM:
+			free(nvbuf);
+			nvsz = zc.zc_nvlist_dst_size;
+			goto tryagain;
+
+		case ENOTSUP:
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			    "pool must be upgraded"));
+			err = zfs_error(hdl, EZFS_BADVERSION, errbuf);
+			break;
+		case EINVAL:
+			err = zfs_error(hdl, EZFS_BADTYPE, errbuf);
+			break;
+		case ENOENT:
+			err = zfs_error(hdl, EZFS_NOENT, errbuf);
+			break;
+		default:
+			err = zfs_standard_error_fmt(hdl, errno, errbuf);
+			break;
+		}
+	} else {
+		/* success */
+		int rc = nvlist_unpack(nvbuf, zc.zc_nvlist_dst_size, nvl, 0);
+		if (rc) {
+			(void) snprintf(errbuf, sizeof (errbuf), dgettext(
+			    TEXT_DOMAIN, "cannot get permissions on '%s'"),
+			    zc.zc_name);
+			err = zfs_standard_error_fmt(hdl, rc, errbuf);
+		}
+	}
+
+	free(nvbuf);
+out:
+	return (err);
+}
+
+int
+zfs_set_fsacl(zfs_handle_t *zhp, boolean_t un, nvlist_t *nvl)
+{
+	zfs_cmd_t zc = { "\0", "\0", "\0", "\0", 0 };
+	libzfs_handle_t *hdl = zhp->zfs_hdl;
+	char *nvbuf;
+	char errbuf[ZFS_MAXNAMELEN+32];
+	size_t nvsz;
+	int err;
+
+	assert(zhp->zfs_type == ZFS_TYPE_VOLUME ||
+	    zhp->zfs_type == ZFS_TYPE_FILESYSTEM);
+
+	err = nvlist_size(nvl, &nvsz, NV_ENCODE_NATIVE);
+	assert(err == 0);
+
+	nvbuf = malloc(nvsz);
+
+	err = nvlist_pack(nvl, &nvbuf, &nvsz, NV_ENCODE_NATIVE, 0);
+	assert(err == 0);
+
+	zc.zc_nvlist_src_size = nvsz;
+	zc.zc_nvlist_src = (uintptr_t)nvbuf;
+	zc.zc_perm_action = un;
+
+	(void) strlcpy(zc.zc_name, zhp->zfs_name, sizeof (zc.zc_name));
+
+	if (zfs_ioctl(hdl, ZFS_IOC_SET_FSACL, &zc) != 0) {
+		(void) snprintf(errbuf, sizeof (errbuf),
+		    dgettext(TEXT_DOMAIN, "cannot set permissions on '%s'"),
+		    zc.zc_name);
+		switch (errno) {
+		case ENOTSUP:
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			    "pool must be upgraded"));
+			err = zfs_error(hdl, EZFS_BADVERSION, errbuf);
+			break;
+		case EINVAL:
+			err = zfs_error(hdl, EZFS_BADTYPE, errbuf);
+			break;
+		case ENOENT:
+			err = zfs_error(hdl, EZFS_NOENT, errbuf);
+			break;
+		default:
+			err = zfs_standard_error_fmt(hdl, errno, errbuf);
+			break;
+		}
+	}
+
+	free(nvbuf);
+
+	return (err);
+}
+
+int
+zfs_get_holds(zfs_handle_t *zhp, nvlist_t **nvl)
+{
+	zfs_cmd_t zc = { "\0", "\0", "\0", "\0", 0 };
+	libzfs_handle_t *hdl = zhp->zfs_hdl;
+	int nvsz = 2048;
+	void *nvbuf;
+	int err = 0;
+	char errbuf[ZFS_MAXNAMELEN+32];
+
+	assert(zhp->zfs_type == ZFS_TYPE_SNAPSHOT);
+
+tryagain:
+
+	nvbuf = malloc(nvsz);
+	if (nvbuf == NULL) {
+		err = (zfs_error(hdl, EZFS_NOMEM, strerror(errno)));
+		goto out;
+	}
+
+	zc.zc_nvlist_dst_size = nvsz;
+	zc.zc_nvlist_dst = (uintptr_t)nvbuf;
+
+	(void) strlcpy(zc.zc_name, zhp->zfs_name, ZFS_MAXNAMELEN);
+
+	if (zfs_ioctl(hdl, ZFS_IOC_GET_HOLDS, &zc) != 0) {
+		(void) snprintf(errbuf, sizeof (errbuf),
+		    dgettext(TEXT_DOMAIN, "cannot get holds for '%s'"),
+		    zc.zc_name);
+		switch (errno) {
+		case ENOMEM:
+			free(nvbuf);
+			nvsz = zc.zc_nvlist_dst_size;
+			goto tryagain;
+
+		case ENOTSUP:
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			    "pool must be upgraded"));
+			err = zfs_error(hdl, EZFS_BADVERSION, errbuf);
+			break;
+		case EINVAL:
+			err = zfs_error(hdl, EZFS_BADTYPE, errbuf);
+			break;
+		case ENOENT:
+			err = zfs_error(hdl, EZFS_NOENT, errbuf);
+			break;
+		default:
+			err = zfs_standard_error_fmt(hdl, errno, errbuf);
+			break;
+		}
+	} else {
+		/* success */
+		int rc = nvlist_unpack(nvbuf, zc.zc_nvlist_dst_size, nvl, 0);
+		if (rc) {
+			(void) snprintf(errbuf, sizeof (errbuf),
+			    dgettext(TEXT_DOMAIN, "cannot get holds for '%s'"),
+			    zc.zc_name);
+			err = zfs_standard_error_fmt(hdl, rc, errbuf);
+		}
+	}
+
+	free(nvbuf);
+out:
+	return (err);
 }
 
 uint64_t

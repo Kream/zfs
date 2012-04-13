@@ -52,16 +52,15 @@ ZFS_AC_LICENSE
 ZFS_AC_PACKAGE
 ZFS_AC_CONFIG
 ZFS_AC_DEBUG
+ZFS_AC_DEBUG_DMU_TX
 
 AC_CONFIG_FILES([ 
 	Makefile
 	dracut/Makefile
 	dracut/90zfs/Makefile
+	udev/Makefile
+	udev/rules.d/Makefile
 	etc/Makefile
-	etc/udev/Makefile
-	etc/udev/rules.d/Makefile
-	etc/udev/rules.d/60-zpool.rules
-	etc/udev/rules.d/60-zvol.rules
 	etc/init.d/Makefile
 	etc/zfs/Makefile
 	man/Makefile
@@ -86,6 +85,7 @@ AC_CONFIG_FILES([
 	lib/libuutil/Makefile
 	lib/libzpool/Makefile
 	lib/libzfs/Makefile
+	lib/libshare/Makefile
 	cmd/Makefile
 	cmd/zdb/Makefile
 	cmd/zfs/Makefile
@@ -97,6 +97,7 @@ AC_CONFIG_FILES([
 	cmd/zpool_layout/Makefile
 	cmd/zvol_id/Makefile
 	cmd/zpool_id/Makefile
+	cmd/sas_switch_id/Makefile
 	module/Makefile
 	module/avl/Makefile
 	module/nvpair/Makefile
@@ -118,6 +119,8 @@ AC_CONFIG_FILES([
 	scripts/common.sh
 	zfs.spec
 	zfs-modules.spec
+	PKGBUILD-zfs
+	PKGBUILD-zfs-modules
 	zfs-script-config.sh
 ])
 

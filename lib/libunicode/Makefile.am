@@ -6,7 +6,7 @@ DEFAULT_INCLUDES += \
 	-I$(top_srcdir)/include \
 	-I$(top_srcdir)/lib/libspl/include
 
-lib_LTLIBRARIES = libunicode.la
+noinst_LTLIBRARIES = libunicode.la
 
 libunicode_la_SOURCES = \
 	$(top_srcdir)/module/unicode/u8_textprep.c \

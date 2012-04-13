@@ -20,6 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011 by Delphix. All rights reserved.
  */
 
 /* Portions Copyright 2010 Robert Milkowski */
@@ -185,6 +186,14 @@ zfs_prop_init(void)
 		{ NULL }
 	};
 
+	static zprop_index_t xattr_table[] = {
+		{ "off",	ZFS_XATTR_OFF },
+		{ "on",		ZFS_XATTR_DIR },
+		{ "sa",		ZFS_XATTR_SA },
+		{ "dir",	ZFS_XATTR_DIR },
+		{ NULL }
+	};
+
 	/* inherit index properties */
 	zprop_register_index(ZFS_PROP_SYNC, "sync", ZFS_SYNC_STANDARD,
 	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
@@ -225,6 +234,9 @@ zfs_prop_init(void)
 	zprop_register_index(ZFS_PROP_LOGBIAS, "logbias", ZFS_LOGBIAS_LATENCY,
 	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
 	    "latency | throughput", "LOGBIAS", logbias_table);
+	zprop_register_index(ZFS_PROP_XATTR, "xattr", ZFS_XATTR_DIR,
+	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT,
+	    "on | off | dir | sa", "XATTR", xattr_table);
 
 	/* inherit index (boolean) properties */
 	zprop_register_index(ZFS_PROP_ATIME, "atime", 1, PROP_INHERIT,
@@ -243,12 +255,8 @@ zfs_prop_init(void)
 	    boolean_table);
 	zprop_register_index(ZFS_PROP_ZONED, "zoned", 0, PROP_INHERIT,
 	    ZFS_TYPE_FILESYSTEM, "on | off", "ZONED", boolean_table);
-	zprop_register_index(ZFS_PROP_XATTR, "xattr", 1, PROP_INHERIT,
-	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT, "on | off", "XATTR",
-	    boolean_table);
 	zprop_register_index(ZFS_PROP_VSCAN, "vscan", 0, PROP_INHERIT,
-	    ZFS_TYPE_FILESYSTEM, "on | off", "VSCAN",
-	    boolean_table);
+	    ZFS_TYPE_FILESYSTEM, "on | off", "VSCAN", boolean_table);
 	zprop_register_index(ZFS_PROP_NBMAND, "nbmand", 0, PROP_INHERIT,
 	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT, "on | off", "NBMAND",
 	    boolean_table);
@@ -311,6 +319,9 @@ zfs_prop_init(void)
 	zprop_register_number(ZFS_PROP_COMPRESSRATIO, "compressratio", 0,
 	    PROP_READONLY, ZFS_TYPE_DATASET,
 	    "<1.00x or higher if compressed>", "RATIO");
+	zprop_register_number(ZFS_PROP_REFRATIO, "refcompressratio", 0,
+	    PROP_READONLY, ZFS_TYPE_DATASET,
+	    "<1.00x or higher if compressed>", "REFRATIO");
 	zprop_register_number(ZFS_PROP_VOLBLOCKSIZE, "volblocksize",
 	    ZVOL_DEFAULT_BLOCKSIZE, PROP_ONETIME,
 	    ZFS_TYPE_VOLUME, "512 to 128k, power of 2",	"VOLBLOCK");

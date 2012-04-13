@@ -8,8 +8,6 @@ DEFAULT_INCLUDES += \
 
 lib_LTLIBRARIES = libuutil.la
 
-libuutil_la_LIBADD = $(top_builddir)/lib/libavl/libavl.la
-
 libuutil_la_SOURCES = \
 	$(top_srcdir)/lib/libuutil/uu_alloc.c \
 	$(top_srcdir)/lib/libuutil/uu_avl.c \
@@ -21,3 +19,10 @@ libuutil_la_SOURCES = \
 	$(top_srcdir)/lib/libuutil/uu_pname.c \
 	$(top_srcdir)/lib/libuutil/uu_string.c \
 	$(top_srcdir)/lib/libuutil/uu_strtoint.c
+
+libuutil_la_LIBADD = \
+	$(top_builddir)/lib/libavl/libavl.la \
+	$(top_builddir)/lib/libspl/libspl.la \
+	$(top_builddir)/lib/libefi/libefi.la
+
+libuutil_la_LDFLAGS = -pthread -version-info 1:1:0

@@ -8,11 +8,6 @@ DEFAULT_INCLUDES += \
 
 lib_LTLIBRARIES = libzpool.la
 
-libzpool_la_LIBADD = \
-	$(top_builddir)/lib/libunicode/libunicode.la \
-	$(top_builddir)/lib/libavl/libavl.la \
-	$(top_builddir)/lib/libspl/libspl.la
-
 libzpool_la_SOURCES = \
 	$(top_srcdir)/lib/libzpool/kernel.c \
 	$(top_srcdir)/lib/libzpool/taskq.c \
@@ -93,11 +88,16 @@ libzpool_la_SOURCES = \
 	$(top_srcdir)/module/zfs/zle.c \
 	$(top_srcdir)/module/zfs/zrlock.c
 
-libzpool_la_LDFLAGS = -pthread
+libzpool_la_LIBADD = \
+	$(top_builddir)/lib/libunicode/libunicode.la \
+	$(top_builddir)/lib/libuutil/libuutil.la
+
+libzpool_la_LDFLAGS = -pthread -version-info 1:1:0
 
 EXTRA_DIST = \
 	$(top_srcdir)/module/zfs/vdev_disk.c \
 	$(top_srcdir)/module/zfs/zfs_acl.c \
+	$(top_srcdir)/module/zfs/zfs_ctldir.c \
 	$(top_srcdir)/module/zfs/zfs_dir.c \
 	$(top_srcdir)/module/zfs/zfs_ioctl.c \
 	$(top_srcdir)/module/zfs/zfs_log.c \
@@ -106,6 +106,8 @@ EXTRA_DIST = \
 	$(top_srcdir)/module/zfs/zfs_rlock.c \
 	$(top_srcdir)/module/zfs/zfs_vfsops.c \
 	$(top_srcdir)/module/zfs/zfs_vnops.c \
+	$(top_srcdir)/module/zfs/zpl_ctldir.c \
+	$(top_srcdir)/module/zfs/zpl_export.c \
 	$(top_srcdir)/module/zfs/zpl_file.c \
 	$(top_srcdir)/module/zfs/zpl_inode.c \
 	$(top_srcdir)/module/zfs/zpl_super.c \

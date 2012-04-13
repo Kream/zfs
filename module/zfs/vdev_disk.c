@@ -87,10 +87,10 @@ bdev_capacity(struct block_device *bdev)
 
 	/* The partition capacity referenced by the block device */
 	if (part)
-	       return part->nr_sects;
+		return (part->nr_sects << 9);
 
 	/* Otherwise assume the full device capacity */
-	return get_capacity(bdev->bd_disk);
+	return (get_capacity(bdev->bd_disk) << 9);
 }
 
 static void
@@ -118,6 +118,12 @@ vdev_disk_error(zio_t *zio)
  * automatically imported on module load so we must do this at device
  * open time from the kernel.
  */
+#define SET_SCHEDULER_CMD \
+	"exec 0</dev/null " \
+	"     1>/sys/block/%s/queue/scheduler " \
+	"     2>/dev/null; " \
+	"echo %s"
+
 static int
 vdev_elevator_switch(vdev_t *v, char *elevator)
 {
@@ -125,11 +131,9 @@ vdev_elevator_switch(vdev_t *v, char *elevator)
 	struct block_device *bdev = vd->vd_bdev;
 	struct request_queue *q = bdev_get_queue(bdev);
 	char *device = bdev->bd_disk->disk_name;
-	char sh_path[] = "/bin/sh";
-	char sh_cmd[128];
-	char *argv[] = { sh_path, "-c", sh_cmd };
+	char *argv[] = { "/bin/sh", "-c", NULL, NULL };
 	char *envp[] = { NULL };
-	int count = 0, error;
+	int error;
 
 	/* Skip devices which are not whole disks (partitions) */
 	if (!v->vdev_wholedisk)
@@ -143,22 +147,13 @@ vdev_elevator_switch(vdev_t *v, char *elevator)
 	if (!strncmp(elevator, "none", 4) && (strlen(elevator) == 4))
 		return (0);
 
-	/*
-	 * Set the desired scheduler with a three attempt retry for
-	 * -EFAULT which has been observed to occur spuriously.
-	 */
-	sprintf(sh_cmd, "%s \"%s\" >/sys/block/%s/queue/scheduler",
-	    "/bin/echo", elevator, device);
-
-	while (++count <= 3) {
-		error = call_usermodehelper(sh_path, argv, envp, 1);
-		if ((error == 0) || (error != -EFAULT))
-		       break;
-	}
-
+	argv[2] = kmem_asprintf(SET_SCHEDULER_CMD, device, elevator);
+	error = call_usermodehelper(argv[0], argv, envp, 1);
 	if (error)
 		printk("ZFS: Unable to set \"%s\" scheduler for %s (%s): %d\n",
 		       elevator, v->vdev_path, device, error);
+
+	strfree(argv[2]);
 
 	return (error);
 }
@@ -223,7 +218,7 @@ vdev_disk_open(vdev_t *v, uint64_t *psize, uint64_t *ashift)
 	v->vdev_nowritecache = B_FALSE;
 
 	/* Physical volume size in bytes */
-	*psize = bdev_capacity(bdev) * block_size;
+	*psize = bdev_capacity(bdev);
 
 	/* Based on the minimum sector size set the block size */
 	*ashift = highbit(MAX(block_size, SPA_MINBLOCKSIZE)) - 1;
@@ -422,7 +417,7 @@ __vdev_disk_physio(struct block_device *bdev, zio_t *zio, caddr_t kbuf_ptr,
 	caddr_t bio_ptr;
 	uint64_t bio_offset;
 	int bio_size, bio_count = 16;
-	int i = 0, error = 0, block_size;
+	int i = 0, error = 0;
 
 	ASSERT3U(kbuf_offset + kbuf_size, <=, bdev->bd_inode->i_size);
 
@@ -436,7 +431,6 @@ retry:
 
 	dr->dr_zio = zio;
 	dr->dr_rw = flags;
-	block_size = vdev_bdev_block_size(bdev);
 
 	/*
 	 * When the IO size exceeds the maximum bio size for the request
@@ -477,7 +471,7 @@ retry:
 		vdev_disk_dio_get(dr);
 
 		dr->dr_bio[i]->bi_bdev = bdev;
-		dr->dr_bio[i]->bi_sector = bio_offset / block_size;
+		dr->dr_bio[i]->bi_sector = bio_offset >> 9;
 		dr->dr_bio[i]->bi_rw = dr->dr_rw;
 		dr->dr_bio[i]->bi_end_io = vdev_disk_physio_completion;
 		dr->dr_bio[i]->bi_private = dr;
@@ -565,7 +559,7 @@ vdev_disk_io_flush(struct block_device *bdev, zio_t *zio)
 	bio->bi_private = zio;
 	bio->bi_bdev = bdev;
 	zio->io_delay = jiffies_64;
-	submit_bio(WRITE_BARRIER, bio);
+	submit_bio(VDEV_WRITE_FLUSH_FUA, bio);
 
 	return 0;
 }
@@ -720,7 +714,7 @@ vdev_disk_read_rootlabel(char *devpath, char *devid, nvlist_t **config)
 	if (IS_ERR(bdev))
 		return -PTR_ERR(bdev);
 
-	s = bdev_capacity(bdev) * vdev_bdev_block_size(bdev);
+	s = bdev_capacity(bdev);
 	if (s == 0) {
 		vdev_bdev_close(bdev, vdev_bdev_mode(FREAD));
 		return EIO;
@@ -768,4 +762,4 @@ vdev_disk_read_rootlabel(char *devpath, char *devid, nvlist_t **config)
 }
 
 module_param(zfs_vdev_scheduler, charp, 0644);
-MODULE_PARM_DESC(zfs_vdev_scheduler, "IO Scheduler (noop)");
+MODULE_PARM_DESC(zfs_vdev_scheduler, "I/O scheduler");

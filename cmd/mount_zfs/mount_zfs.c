@@ -96,6 +96,7 @@ static const option_map_t option_map[] = {
 	{ MNTOPT_QUIET,		MS_SILENT,	ZS_COMMENT	},
 #endif
 	/* Custom zfs options */
+	{ MNTOPT_XATTR,		MS_COMMENT,	ZS_COMMENT	},
 	{ MNTOPT_NOXATTR,	MS_COMMENT,	ZS_COMMENT	},
 	{ MNTOPT_ZFSUTIL,	MS_COMMENT,	ZS_ZFSUTIL	},
 	{ NULL,			0,		0		} };
@@ -252,7 +253,7 @@ mtab_is_writeable(void)
 	struct stat st;
 	int error, fd;
 
-	error = stat(MNTTAB, &st);
+	error = lstat(MNTTAB, &st);
 	if (error || S_ISLNK(st.st_mode))
 		return (0);
 
@@ -428,15 +429,20 @@ main(int argc, char **argv)
 		return (MOUNT_SYSERR);
 
 	/* try to open the dataset to access the mount point */
-	if ((zhp = zfs_open(g_zfs, dataset, ZFS_TYPE_FILESYSTEM)) == NULL) {
+	if ((zhp = zfs_open(g_zfs, dataset,
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT)) == NULL) {
 		(void) fprintf(stderr, gettext("filesystem '%s' cannot be "
 		    "mounted, unable to open the dataset\n"), dataset);
 		libzfs_fini(g_zfs);
 		return (MOUNT_USAGE);
 	}
 
-	(void) zfs_prop_get(zhp, ZFS_PROP_MOUNTPOINT, legacy,
-	    sizeof (legacy), NULL, NULL, 0, B_FALSE);
+	/* treat all snapshots as legacy mount points */
+	if (zfs_get_type(zhp) == ZFS_TYPE_SNAPSHOT)
+		(void) strlcpy(legacy, ZFS_MOUNTPOINT_LEGACY, ZFS_MAXPROPLEN);
+	else
+		(void) zfs_prop_get(zhp, ZFS_PROP_MOUNTPOINT, legacy,
+		    sizeof (legacy), NULL, NULL, 0, B_FALSE);
 
 	zfs_close(zhp);
 	libzfs_fini(g_zfs);
@@ -474,6 +480,10 @@ main(int argc, char **argv)
 		    mntflags, mntopts);
 		if (error) {
 			switch (errno) {
+			case ENOENT:
+				(void) fprintf(stderr, gettext("mount point "
+				    "'%s' does not exist\n"), mntpoint);
+				return (MOUNT_SYSERR);
 			case EBUSY:
 				(void) fprintf(stderr, gettext("filesystem "
 				    "'%s' is already mounted\n"), dataset);

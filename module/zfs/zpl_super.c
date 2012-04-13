@@ -26,6 +26,7 @@
 #include <sys/zfs_vfsops.h>
 #include <sys/zfs_vnops.h>
 #include <sys/zfs_znode.h>
+#include <sys/zfs_ctldir.h>
 #include <sys/zpl.h>
 
 
@@ -73,7 +74,7 @@ zpl_inode_destroy(struct inode *ip)
 static void
 zpl_evict_inode(struct inode *ip)
 {
-	truncate_inode_pages(&ip->i_data, 0);
+	truncate_setsize(ip, 0);
 	end_writeback(ip);
 	zfs_inactive(ip);
 }
@@ -89,7 +90,7 @@ zpl_clear_inode(struct inode *ip)
 static void
 zpl_inode_delete(struct inode *ip)
 {
-	truncate_inode_pages(&ip->i_data, 0);
+	truncate_setsize(ip, 0);
 	clear_inode(ip);
 }
 
@@ -139,22 +140,45 @@ zpl_remount_fs(struct super_block *sb, int *flags, char *data)
 	return (error);
 }
 
-static int
-zpl_show_options(struct seq_file *seq, struct vfsmount *vfsp)
+static void
+zpl_umount_begin(struct super_block *sb)
 {
-	struct super_block *sb = vfsp->mnt_sb;
 	zfs_sb_t *zsb = sb->s_fs_info;
+	int count;
 
 	/*
-	 * The Linux VFS automatically handles the following flags:
-	 * MNT_NOSUID, MNT_NODEV, MNT_NOEXEC, MNT_NOATIME, MNT_READONLY
+	 * Best effort to unmount snapshots in .zfs/snapshot/.  Normally this
+	 * isn't required because snapshots have the MNT_SHRINKABLE flag set.
 	 */
+	if (zsb->z_ctldir)
+		(void) zfsctl_unmount_snapshots(zsb, MNT_FORCE, &count);
+}
 
-	if (zsb->z_flags & ZSB_XATTR_USER)
-		seq_printf(seq, ",%s", "xattr");
+/*
+ * The Linux VFS automatically handles the following flags:
+ * MNT_NOSUID, MNT_NODEV, MNT_NOEXEC, MNT_NOATIME, MNT_READONLY
+ */
+#ifdef HAVE_SHOW_OPTIONS_WITH_DENTRY
+static int
+zpl_show_options(struct seq_file *seq, struct dentry *root)
+{
+	zfs_sb_t *zsb = root->d_sb->s_fs_info;
+
+	seq_printf(seq, ",%s", zsb->z_flags & ZSB_XATTR ? "xattr" : "noxattr");
 
 	return (0);
 }
+#else
+static int
+zpl_show_options(struct seq_file *seq, struct vfsmount *vfsp)
+{
+	zfs_sb_t *zsb = vfsp->mnt_sb->s_fs_info;
+
+	seq_printf(seq, ",%s", zsb->z_flags & ZSB_XATTR ? "xattr" : "noxattr");
+
+	return (0);
+}
+#endif /* HAVE_SHOW_OPTIONS_WITH_DENTRY */
 
 static int
 zpl_fill_super(struct super_block *sb, void *data, int silent)
@@ -167,60 +191,148 @@ zpl_fill_super(struct super_block *sb, void *data, int silent)
 	return (error);
 }
 
+#ifdef HAVE_MOUNT_NODEV
+static struct dentry *
+zpl_mount(struct file_system_type *fs_type, int flags,
+    const char *osname, void *data)
+{
+	zpl_mount_data_t zmd = { osname, data };
+
+	return mount_nodev(fs_type, flags, &zmd, zpl_fill_super);
+}
+#else
 static int
 zpl_get_sb(struct file_system_type *fs_type, int flags,
     const char *osname, void *data, struct vfsmount *mnt)
 {
-	zpl_mount_data_t zmd = { osname, data, mnt };
+	zpl_mount_data_t zmd = { osname, data };
 
 	return get_sb_nodev(fs_type, flags, &zmd, zpl_fill_super, mnt);
 }
+#endif /* HAVE_MOUNT_NODEV */
 
 static void
 zpl_kill_sb(struct super_block *sb)
 {
-#ifdef HAVE_SNAPSHOT
-	zfs_sb_t *zsb = sb->s_fs_info;
-
-	if (zsb && dmu_objset_is_snapshot(zsb->z_os))
-		zfs_snap_destroy(zsb);
-#endif /* HAVE_SNAPSHOT */
-
+	zfs_preumount(sb);
 	kill_anon_super(sb);
 }
 
-const struct super_operations zpl_super_operations = {
-	.alloc_inode	= zpl_inode_alloc,
-	.destroy_inode	= zpl_inode_destroy,
-	.dirty_inode	= NULL,
-	.write_inode	= NULL,
-	.drop_inode	= NULL,
-#ifdef HAVE_EVICT_INODE
-	.evict_inode	= zpl_evict_inode,
-#else
-	.clear_inode	= zpl_clear_inode,
-	.delete_inode	= zpl_inode_delete,
-#endif /* HAVE_EVICT_INODE */
-	.put_super	= zpl_put_super,
-	.write_super	= NULL,
-	.sync_fs	= zpl_sync_fs,
-	.statfs		= zpl_statfs,
-	.remount_fs	= zpl_remount_fs,
-	.show_options	= zpl_show_options,
-	.show_stats	= NULL,
-};
+#ifdef HAVE_SHRINK
+/*
+ * Linux 3.1 - 3.x API
+ *
+ * The Linux 3.1 API introduced per-sb cache shrinkers to replace the
+ * global ones.  This allows us a mechanism to cleanly target a specific
+ * zfs file system when the dnode and inode caches grow too large.
+ *
+ * In addition, the 3.0 kernel added the iterate_supers_type() helper
+ * function which is used to safely walk all of the zfs file systems.
+ */
+static void
+zpl_prune_sb(struct super_block *sb, void *arg)
+{
+	int objects = 0;
+	int error;
 
-#if 0
-const struct export_operations zpl_export_operations = {
-	.fh_to_dentry	= NULL,
-	.fh_to_parent	= NULL,
-	.get_parent	= NULL,
+	error = -zfs_sb_prune(sb, *(unsigned long *)arg, &objects);
+	ASSERT3S(error, <=, 0);
+
+	return;
+}
+
+void
+zpl_prune_sbs(int64_t bytes_to_scan, void *private)
+{
+	unsigned long nr_to_scan = (bytes_to_scan / sizeof(znode_t));
+
+	iterate_supers_type(&zpl_fs_type, zpl_prune_sb, &nr_to_scan);
+	kmem_reap();
+}
+#else
+/*
+ * Linux 2.6.x - 3.0 API
+ *
+ * These are best effort interfaces are provided by the SPL to induce
+ * the Linux VM subsystem to reclaim a fraction of the both dnode and
+ * inode caches.  Ideally, we want to just target the zfs file systems
+ * however our only option is to reclaim from them all.
+ */
+void
+zpl_prune_sbs(int64_t bytes_to_scan, void *private)
+{
+	unsigned long nr_to_scan = (bytes_to_scan / sizeof(znode_t));
+
+        shrink_dcache_memory(nr_to_scan, GFP_KERNEL);
+        shrink_icache_memory(nr_to_scan, GFP_KERNEL);
+        kmem_reap();
+}
+#endif /* HAVE_SHRINK */
+
+#ifdef HAVE_NR_CACHED_OBJECTS
+static int
+zpl_nr_cached_objects(struct super_block *sb)
+{
+	zfs_sb_t *zsb = sb->s_fs_info;
+	int nr;
+
+	mutex_enter(&zsb->z_znodes_lock);
+	nr = zsb->z_nr_znodes;
+	mutex_exit(&zsb->z_znodes_lock);
+
+	return (nr);
+}
+#endif /* HAVE_NR_CACHED_OBJECTS */
+
+#ifdef HAVE_FREE_CACHED_OBJECTS
+/*
+ * Attempt to evict some meta data from the cache.  The ARC operates in
+ * terms of bytes while the Linux VFS uses objects.  Now because this is
+ * just a best effort eviction and the exact values aren't critical so we
+ * extrapolate from an object count to a byte size using the znode_t size.
+ */
+static void
+zpl_free_cached_objects(struct super_block *sb, int nr_to_scan)
+{
+	arc_adjust_meta(nr_to_scan * sizeof(znode_t), B_FALSE);
+}
+#endif /* HAVE_FREE_CACHED_OBJECTS */
+
+const struct super_operations zpl_super_operations = {
+	.alloc_inode		= zpl_inode_alloc,
+	.destroy_inode		= zpl_inode_destroy,
+	.dirty_inode		= NULL,
+	.write_inode		= NULL,
+	.drop_inode		= NULL,
+#ifdef HAVE_EVICT_INODE
+	.evict_inode		= zpl_evict_inode,
+#else
+	.clear_inode		= zpl_clear_inode,
+	.delete_inode		= zpl_inode_delete,
+#endif /* HAVE_EVICT_INODE */
+	.put_super		= zpl_put_super,
+	.write_super		= NULL,
+	.sync_fs		= zpl_sync_fs,
+	.statfs			= zpl_statfs,
+	.remount_fs		= zpl_remount_fs,
+	.umount_begin		= zpl_umount_begin,
+	.show_options		= zpl_show_options,
+	.show_stats		= NULL,
+#ifdef HAVE_NR_CACHED_OBJECTS
+	.nr_cached_objects	= zpl_nr_cached_objects,
+#endif /* HAVE_NR_CACHED_OBJECTS */
+#ifdef HAVE_FREE_CACHED_OBJECTS
+	.free_cached_objects	= zpl_free_cached_objects,
+#endif /* HAVE_FREE_CACHED_OBJECTS */
 };
-#endif
 
 struct file_system_type zpl_fs_type = {
-	.owner		= THIS_MODULE,
-	.name		= ZFS_DRIVER,
-	.get_sb		= zpl_get_sb,
-	.kill_sb	= zpl_kill_sb,
+	.owner			= THIS_MODULE,
+	.name			= ZFS_DRIVER,
+#ifdef HAVE_MOUNT_NODEV
+	.mount			= zpl_mount,
+#else
+	.get_sb			= zpl_get_sb,
+#endif /* HAVE_MOUNT_NODEV */
+	.kill_sb		= zpl_kill_sb,
 };

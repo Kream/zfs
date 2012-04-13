@@ -506,7 +506,7 @@ void
 txg_delay(dsl_pool_t *dp, uint64_t txg, int ticks)
 {
 	tx_state_t *tx = &dp->dp_tx;
-	int timeout = ddi_get_lbolt() + ticks;
+	clock_t timeout = ddi_get_lbolt() + ticks;
 
 	/* don't delay if this txg could transition to quiesing immediately */
 	if (tx->tx_open_txg > txg ||
@@ -523,6 +523,8 @@ txg_delay(dsl_pool_t *dp, uint64_t txg, int ticks)
 	    tx->tx_syncing_txg < txg-1 && !txg_stalled(dp))
 		(void) cv_timedwait(&tx->tx_quiesce_more_cv, &tx->tx_sync_lock,
 		    timeout);
+
+	DMU_TX_STAT_BUMP(dmu_tx_delay);
 
 	mutex_exit(&tx->tx_sync_lock);
 }

@@ -50,6 +50,7 @@
 #include <sys/zap.h>
 #include <sys/dmu.h>
 #include <sys/atomic.h>
+#include <sys/zfs_ctldir.h>
 #include <sys/zfs_fuid.h>
 #include <sys/sa.h>
 #include <sys/zfs_sa.h>
@@ -64,11 +65,11 @@ static int
 zfs_match_find(zfs_sb_t *zsb, znode_t *dzp, char *name, boolean_t exact,
     boolean_t update, int *deflags, pathname_t *rpnp, uint64_t *zoid)
 {
+	boolean_t conflict = B_FALSE;
 	int error;
 
 	if (zsb->z_norm) {
 		matchtype_t mt = MT_FIRST;
-		boolean_t conflict = B_FALSE;
 		size_t bufsz = 0;
 		char *buf = NULL;
 
@@ -84,11 +85,23 @@ zfs_match_find(zfs_sb_t *zsb, znode_t *dzp, char *name, boolean_t exact,
 		 */
 		error = zap_lookup_norm(zsb->z_os, dzp->z_id, name, 8, 1,
 		    zoid, mt, buf, bufsz, &conflict);
-		if (!error && deflags)
-			*deflags = conflict ? ED_CASE_CONFLICT : 0;
 	} else {
 		error = zap_lookup(zsb->z_os, dzp->z_id, name, 8, 1, zoid);
 	}
+
+	/*
+	 * Allow multiple entries provided the first entry is
+	 * the object id.  Non-zpl consumers may safely make
+	 * use of the additional space.
+	 *
+	 * XXX: This should be a feature flag for compatibility
+	 */
+	if (error == EOVERFLOW)
+		error = 0;
+
+	if (zsb->z_norm && !error && deflags)
+		*deflags = conflict ? ED_CASE_CONFLICT : 0;
+
 	*zoid = ZFS_DIRENT_OBJ(*zoid);
 
 #ifdef HAVE_DNLC
@@ -403,28 +416,24 @@ zfs_dirlook(znode_t *dzp, char *name, struct inode **ipp, int flags,
 
 		/*
 		 * If we are a snapshot mounted under .zfs, return
-		 * the vp for the snapshot directory.
+		 * the inode pointer for the snapshot directory.
 		 */
 		if ((error = sa_lookup(dzp->z_sa_hdl,
 		    SA_ZPL_PARENT(zsb), &parent, sizeof (parent))) != 0)
 			return (error);
-#ifdef HAVE_SNAPSHOT
+
 		if (parent == dzp->z_id && zsb->z_parent != zsb) {
 			error = zfsctl_root_lookup(zsb->z_parent->z_ctldir,
-			    "snapshot", ipp, NULL, 0, NULL, kcred,
-			    NULL, NULL, NULL);
+			    "snapshot", ipp, 0, kcred, NULL, NULL);
 			return (error);
 		}
-#endif /* HAVE_SNAPSHOT */
 		rw_enter(&dzp->z_parent_lock, RW_READER);
 		error = zfs_zget(zsb, parent, &zp);
 		if (error == 0)
 			*ipp = ZTOI(zp);
 		rw_exit(&dzp->z_parent_lock);
-#ifdef HAVE_SNAPSHOT
 	} else if (zfs_has_ctldir(dzp) && strcmp(name, ZFS_CTLDIR_NAME) == 0) {
 		*ipp = zfsctl_root(dzp);
-#endif /* HAVE_SNAPSHOT */
 	} else {
 		int zf;
 
@@ -471,57 +480,6 @@ zfs_unlinked_add(znode_t *zp, dmu_tx_t *tx)
 
 	VERIFY3U(0, ==,
 	    zap_add_int(zsb->z_os, zsb->z_unlinkedobj, zp->z_id, tx));
-}
-
-/*
- * Clean up any znodes that had no links when we either crashed or
- * (force) umounted the file system.
- */
-void
-zfs_unlinked_drain(zfs_sb_t *zsb)
-{
-	zap_cursor_t	zc;
-	zap_attribute_t zap;
-	dmu_object_info_t doi;
-	znode_t		*zp;
-	int		error;
-
-	/*
-	 * Interate over the contents of the unlinked set.
-	 */
-	for (zap_cursor_init(&zc, zsb->z_os, zsb->z_unlinkedobj);
-	    zap_cursor_retrieve(&zc, &zap) == 0;
-	    zap_cursor_advance(&zc)) {
-
-		/*
-		 * See what kind of object we have in list
-		 */
-
-		error = dmu_object_info(zsb->z_os, zap.za_first_integer, &doi);
-		if (error != 0)
-			continue;
-
-		ASSERT((doi.doi_type == DMU_OT_PLAIN_FILE_CONTENTS) ||
-		    (doi.doi_type == DMU_OT_DIRECTORY_CONTENTS));
-		/*
-		 * We need to re-mark these list entries for deletion,
-		 * so we pull them back into core and set zp->z_unlinked.
-		 */
-		error = zfs_zget(zsb, zap.za_first_integer, &zp);
-
-		/*
-		 * We may pick up znodes that are already marked for deletion.
-		 * This could happen during the purge of an extended attribute
-		 * directory.  All we need to do is skip over them, since they
-		 * are already in the system marked z_unlinked.
-		 */
-		if (error != 0)
-			continue;
-
-		zp->z_unlinked = B_TRUE;
-		iput(ZTOI(zp));
-	}
-	zap_cursor_fini(&zc);
 }
 
 /*
@@ -590,6 +548,71 @@ zfs_purgedir(znode_t *dzp)
 	return (skipped);
 }
 
+/*
+ * Clean up any znodes that had no links when we either crashed or
+ * (force) umounted the file system.
+ */
+void
+zfs_unlinked_drain(zfs_sb_t *zsb)
+{
+	zap_cursor_t	zc;
+	zap_attribute_t zap;
+	dmu_object_info_t doi;
+	znode_t		*zp;
+	int		error;
+
+	/*
+	 * Interate over the contents of the unlinked set.
+	 */
+	for (zap_cursor_init(&zc, zsb->z_os, zsb->z_unlinkedobj);
+	    zap_cursor_retrieve(&zc, &zap) == 0;
+	    zap_cursor_advance(&zc)) {
+
+		/*
+		 * See what kind of object we have in list
+		 */
+
+		error = dmu_object_info(zsb->z_os, zap.za_first_integer, &doi);
+		if (error != 0)
+			continue;
+
+		ASSERT((doi.doi_type == DMU_OT_PLAIN_FILE_CONTENTS) ||
+		    (doi.doi_type == DMU_OT_DIRECTORY_CONTENTS));
+		/*
+		 * We need to re-mark these list entries for deletion,
+		 * so we pull them back into core and set zp->z_unlinked.
+		 */
+		error = zfs_zget(zsb, zap.za_first_integer, &zp);
+
+		/*
+		 * We may pick up znodes that are already marked for deletion.
+		 * This could happen during the purge of an extended attribute
+		 * directory.  All we need to do is skip over them, since they
+		 * are already in the system marked z_unlinked.
+		 */
+		if (error != 0)
+			continue;
+
+		zp->z_unlinked = B_TRUE;
+
+		/*
+		 * If this is an attribute directory, purge its contents.
+		 */
+		if (S_ISDIR(ZTOI(zp)->i_mode) && (zp->z_pflags & ZFS_XATTR)) {
+			/*
+			 * We don't need to check the return value of
+			 * zfs_purgedir here, because zfs_rmnode will just
+			 * return this xattr directory to the unlinked set
+			 * until all of its xattrs are gone.
+			 */
+			(void) zfs_purgedir(zp);
+		}
+
+		iput(ZTOI(zp));
+	}
+	zap_cursor_fini(&zc);
+}
+
 void
 zfs_rmnode(znode_t *zp)
 {
@@ -599,6 +622,7 @@ zfs_rmnode(znode_t *zp)
 	dmu_tx_t	*tx;
 	uint64_t	acl_obj;
 	uint64_t	xattr_obj;
+	uint64_t	count;
 	int		error;
 
 	ASSERT(zp->z_links == 0);
@@ -608,14 +632,27 @@ zfs_rmnode(znode_t *zp)
 	 * If this is an attribute directory, purge its contents.
 	 */
 	if (S_ISDIR(ZTOI(zp)->i_mode) && (zp->z_pflags & ZFS_XATTR)) {
-		if (zfs_purgedir(zp) != 0) {
-			/*
-			 * Not enough space to delete some xattrs.
-			 * Leave it in the unlinked set.
-			 */
+		error = zap_count(os, zp->z_id, &count);
+		if (error) {
 			zfs_znode_dmu_fini(zp);
-			zfs_inode_destroy(ZTOI(zp));
+			return;
+		}
 
+		if (count > 0) {
+			taskq_t *taskq;
+
+			/*
+			 * There are still directory entries in this xattr
+			 * directory.  Let zfs_unlinked_drain() deal with
+			 * them to avoid deadlocking this process in the
+			 * zfs_purgedir()->zfs_zget()->ilookup() callpath
+			 * on the xattr inode's I_FREEING bit.
+			 */
+			taskq = dsl_pool_iput_taskq(dmu_objset_pool(os));
+			taskq_dispatch(taskq, (task_func_t *)
+			    zfs_unlinked_drain, zsb, TQ_SLEEP);
+
+			zfs_znode_dmu_fini(zp);
 			return;
 		}
 	}
@@ -629,7 +666,6 @@ zfs_rmnode(znode_t *zp)
 		 * Not enough space.  Leave the file in the unlinked set.
 		 */
 		zfs_znode_dmu_fini(zp);
-		zfs_inode_destroy(ZTOI(zp));
 		return;
 	}
 
@@ -669,7 +705,6 @@ zfs_rmnode(znode_t *zp)
 		 */
 		dmu_tx_abort(tx);
 		zfs_znode_dmu_fini(zp);
-		zfs_inode_destroy(ZTOI(zp));
 		goto out;
 	}
 
@@ -1019,7 +1054,7 @@ top:
 		return (ENOENT);
 	}
 
-	if (zsb->z_vfs->mnt_flags & MNT_READONLY) {
+	if (zfs_is_readonly(zsb)) {
 		zfs_dirent_unlock(dl);
 		return (EROFS);
 	}

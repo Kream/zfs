@@ -20,6 +20,8 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011 by Delphix. All rights reserved.
+ * Copyright (c) 2011 Nexenta Systems, Inc. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -79,6 +81,7 @@ int zio_delay_max = ZIO_DELAY_MAX;
 #ifdef _KERNEL
 extern vmem_t *zio_alloc_arena;
 #endif
+extern int zfs_mg_alloc_failures;
 
 /*
  * An allocating zio is one that either currently has the DVA allocate
@@ -86,7 +89,7 @@ extern vmem_t *zio_alloc_arena;
  */
 #define	IO_IS_ALLOCATING(zio) ((zio)->io_orig_pipeline & ZIO_STAGE_DVA_ALLOCATE)
 
-boolean_t	zio_requeue_io_start_cut_in_line = B_TRUE;
+int zio_requeue_io_start_cut_in_line = 1;
 
 #ifdef ZFS_DEBUG
 int zio_buf_debug_limit = 16384;
@@ -95,6 +98,35 @@ int zio_buf_debug_limit = 0;
 #endif
 
 static inline void __zio_execute(zio_t *zio);
+
+static int
+zio_cons(void *arg, void *unused, int kmflag)
+{
+	zio_t *zio = arg;
+
+	bzero(zio, sizeof (zio_t));
+
+	mutex_init(&zio->io_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&zio->io_cv, NULL, CV_DEFAULT, NULL);
+
+	list_create(&zio->io_parent_list, sizeof (zio_link_t),
+	    offsetof(zio_link_t, zl_parent_node));
+	list_create(&zio->io_child_list, sizeof (zio_link_t),
+	    offsetof(zio_link_t, zl_child_node));
+
+	return (0);
+}
+
+static void
+zio_dest(void *arg, void *unused)
+{
+	zio_t *zio = arg;
+
+	mutex_destroy(&zio->io_lock);
+	cv_destroy(&zio->io_cv);
+	list_destroy(&zio->io_parent_list);
+	list_destroy(&zio->io_child_list);
+}
 
 void
 zio_init(void)
@@ -105,10 +137,10 @@ zio_init(void)
 #ifdef _KERNEL
 	data_alloc_arena = zio_alloc_arena;
 #endif
-	zio_cache = kmem_cache_create("zio_cache",
-	    sizeof (zio_t), 0, NULL, NULL, NULL, NULL, NULL, 0);
+	zio_cache = kmem_cache_create("zio_cache", sizeof (zio_t), 0,
+	    zio_cons, zio_dest, NULL, NULL, NULL, KMC_KMEM);
 	zio_link_cache = kmem_cache_create("zio_link_cache",
-	    sizeof (zio_link_t), 0, NULL, NULL, NULL, NULL, NULL, 0);
+	    sizeof (zio_link_t), 0, NULL, NULL, NULL, NULL, NULL, KMC_KMEM);
 
 	/*
 	 * For small buffers, we want a cache for each multiple of
@@ -134,17 +166,27 @@ zio_init(void)
 
 		if (align != 0) {
 			char name[36];
+			int flags = zio_bulk_flags;
+
+			/*
+			 * The smallest buffers (512b) are heavily used and
+			 * experience a lot of churn.  The slabs allocated
+			 * for them are also relatively small (32K).  Thus
+			 * in over to avoid expensive calls to vmalloc() we
+			 * make an exception to the usual slab allocation
+			 * policy and force these buffers to be kmem backed.
+			 */
+			if (size == (1 << SPA_MINBLOCKSHIFT))
+				flags |= KMC_KMEM;
+
 			(void) sprintf(name, "zio_buf_%lu", (ulong_t)size);
 			zio_buf_cache[c] = kmem_cache_create(name, size,
-			    align, NULL, NULL, NULL, NULL, NULL,
-			    (size > zio_buf_debug_limit ? KMC_NODEBUG : 0) |
-			    zio_bulk_flags);
+			    align, NULL, NULL, NULL, NULL, NULL, flags);
 
 			(void) sprintf(name, "zio_data_buf_%lu", (ulong_t)size);
 			zio_data_buf_cache[c] = kmem_cache_create(name, size,
-			    align, NULL, NULL, NULL, NULL, data_alloc_arena,
-			    (size > zio_buf_debug_limit ? KMC_NODEBUG : 0) |
-			    zio_bulk_flags);
+			    align, NULL, NULL, NULL, NULL,
+			    data_alloc_arena, flags);
 		}
 	}
 
@@ -157,6 +199,12 @@ zio_init(void)
 		if (zio_data_buf_cache[c - 1] == NULL)
 			zio_data_buf_cache[c - 1] = zio_data_buf_cache[c];
 	}
+
+	/*
+	 * The zio write taskqs have 1 thread per cpu, allow 1/2 of the taskqs
+	 * to fail 3 times per txg or 8 failures, whichever is greater.
+	 */
+	zfs_mg_alloc_failures = MAX((3 * max_ncpus / 2), 8);
 
 	zio_inject_init();
 }
@@ -492,15 +540,6 @@ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
 	ASSERT(vd || stage == ZIO_STAGE_OPEN);
 
 	zio = kmem_cache_alloc(zio_cache, KM_PUSHPAGE);
-	bzero(zio, sizeof (zio_t));
-
-	mutex_init(&zio->io_lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&zio->io_cv, NULL, CV_DEFAULT, NULL);
-
-	list_create(&zio->io_parent_list, sizeof (zio_link_t),
-	    offsetof(zio_link_t, zl_parent_node));
-	list_create(&zio->io_child_list, sizeof (zio_link_t),
-	    offsetof(zio_link_t, zl_child_node));
 
 	if (vd != NULL)
 		zio->io_child_type = ZIO_CHILD_VDEV;
@@ -512,6 +551,7 @@ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
 		zio->io_child_type = ZIO_CHILD_LOGICAL;
 
 	if (bp != NULL) {
+		zio->io_logical = NULL;
 		zio->io_bp = (blkptr_t *)bp;
 		zio->io_bp_copy = *bp;
 		zio->io_bp_orig = *bp;
@@ -522,21 +562,52 @@ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
 			zio->io_logical = zio;
 		if (zio->io_child_type > ZIO_CHILD_GANG && BP_IS_GANG(bp))
 			pipeline |= ZIO_GANG_STAGES;
+	} else {
+		zio->io_logical = NULL;
+		zio->io_bp = NULL;
+		bzero(&zio->io_bp_copy, sizeof (blkptr_t));
+		bzero(&zio->io_bp_orig, sizeof (blkptr_t));
 	}
 
 	zio->io_spa = spa;
 	zio->io_txg = txg;
+	zio->io_ready = NULL;
 	zio->io_done = done;
 	zio->io_private = private;
+	zio->io_prev_space_delta = 0;
 	zio->io_type = type;
 	zio->io_priority = priority;
 	zio->io_vd = vd;
+	zio->io_vsd = NULL;
+	zio->io_vsd_ops = NULL;
 	zio->io_offset = offset;
+	zio->io_deadline = 0;
 	zio->io_orig_data = zio->io_data = data;
 	zio->io_orig_size = zio->io_size = size;
 	zio->io_orig_flags = zio->io_flags = flags;
 	zio->io_orig_stage = zio->io_stage = stage;
 	zio->io_orig_pipeline = zio->io_pipeline = pipeline;
+	bzero(&zio->io_prop, sizeof (zio_prop_t));
+	zio->io_cmd = 0;
+	zio->io_reexecute = 0;
+	zio->io_bp_override = NULL;
+	zio->io_walk_link = NULL;
+	zio->io_transform_stack = NULL;
+	zio->io_delay = 0;
+	zio->io_error = 0;
+	zio->io_child_count = 0;
+	zio->io_parent_count = 0;
+	zio->io_stall = NULL;
+	zio->io_gang_leader = NULL;
+	zio->io_gang_tree = NULL;
+	zio->io_executor = NULL;
+	zio->io_waiter = NULL;
+	zio->io_cksum_report = NULL;
+	zio->io_ena = 0;
+	bzero(zio->io_child_error, sizeof (int) * ZIO_CHILD_TYPES);
+	bzero(zio->io_children,
+	    sizeof (uint64_t) * ZIO_CHILD_TYPES * ZIO_WAIT_TYPES);
+	bzero(&zio->io_bookmark, sizeof (zbookmark_t));
 
 	zio->io_state[ZIO_WAIT_READY] = (stage >= ZIO_STAGE_READY);
 	zio->io_state[ZIO_WAIT_DONE] = (stage >= ZIO_STAGE_DONE);
@@ -552,16 +623,14 @@ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
 		zio_add_child(pio, zio);
 	}
 
+	taskq_init_ent(&zio->io_tqent);
+
 	return (zio);
 }
 
 static void
 zio_destroy(zio_t *zio)
 {
-	list_destroy(&zio->io_parent_list);
-	list_destroy(&zio->io_child_list);
-	mutex_destroy(&zio->io_lock);
-	cv_destroy(&zio->io_cv);
 	kmem_cache_free(zio_cache, zio);
 }
 
@@ -1055,7 +1124,7 @@ zio_taskq_dispatch(zio_t *zio, enum zio_taskq_type q, boolean_t cutinline)
 {
 	spa_t *spa = zio->io_spa;
 	zio_type_t t = zio->io_type;
-	int flags = TQ_NOSLEEP | (cutinline ? TQ_FRONT : 0);
+	int flags = (cutinline ? TQ_FRONT : 0);
 
 	/*
 	 * If we're a config writer or a probe, the normal issue and
@@ -1080,8 +1149,14 @@ zio_taskq_dispatch(zio_t *zio, enum zio_taskq_type q, boolean_t cutinline)
 
 	ASSERT3U(q, <, ZIO_TASKQ_TYPES);
 
-	while (taskq_dispatch(spa->spa_zio_taskq[t][q],
-	    (task_func_t *)zio_execute, zio, flags) == 0); /* do nothing */
+	/*
+	 * NB: We are assuming that the zio can only be dispatched
+	 * to a single taskq at a time.  It would be a grievous error
+	 * to dispatch the zio to another taskq at the same time.
+	 */
+	ASSERT(taskq_empty_ent(&zio->io_tqent));
+	taskq_dispatch_ent(spa->spa_zio_taskq[t][q],
+	    (task_func_t *)zio_execute, zio, flags, &zio->io_tqent);
 }
 
 static boolean_t
@@ -1150,6 +1225,8 @@ __zio_execute(zio_t *zio)
 	while (zio->io_stage < ZIO_STAGE_DONE) {
 		enum zio_stage pipeline = zio->io_pipeline;
 		enum zio_stage stage = zio->io_stage;
+		dsl_pool_t *dsl;
+		boolean_t cut;
 		int rv;
 
 		ASSERT(!MUTEX_HELD(&zio->io_lock));
@@ -1162,19 +1239,26 @@ __zio_execute(zio_t *zio)
 
 		ASSERT(stage <= ZIO_STAGE_DONE);
 
+		dsl = spa_get_dsl(zio->io_spa);
+		cut = (stage == ZIO_STAGE_VDEV_IO_START) ?
+		    zio_requeue_io_start_cut_in_line : B_FALSE;
+
 		/*
 		 * If we are in interrupt context and this pipeline stage
 		 * will grab a config lock that is held across I/O,
 		 * or may wait for an I/O that needs an interrupt thread
 		 * to complete, issue async to avoid deadlock.
 		 *
+		 * If we are in the txg_sync_thread or being called
+		 * during pool init issue async to minimize stack depth.
+		 * Both of these call paths may be recursively called.
+		 *
 		 * For VDEV_IO_START, we cut in line so that the io will
 		 * be sent to disk promptly.
 		 */
-		if ((stage & ZIO_BLOCKING_STAGES) && zio->io_vd == NULL &&
-		    zio_taskq_member(zio, ZIO_TASKQ_INTERRUPT)) {
-			boolean_t cut = (stage == ZIO_STAGE_VDEV_IO_START) ?
-			    zio_requeue_io_start_cut_in_line : B_FALSE;
+		if (((stage & ZIO_BLOCKING_STAGES) && zio->io_vd == NULL &&
+		    zio_taskq_member(zio, ZIO_TASKQ_INTERRUPT)) ||
+		    (dsl != NULL && dsl_pool_sync_context(dsl))) {
 			zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, cut);
 			return;
 		}
@@ -2142,6 +2226,7 @@ zio_dva_allocate(zio_t *zio)
 	metaslab_class_t *mc = spa_normal_class(spa);
 	blkptr_t *bp = zio->io_bp;
 	int error;
+	int flags = 0;
 
 	if (zio->io_gang_leader == NULL) {
 		ASSERT(zio->io_child_type > ZIO_CHILD_GANG);
@@ -2154,10 +2239,21 @@ zio_dva_allocate(zio_t *zio)
 	ASSERT3U(zio->io_prop.zp_copies, <=, spa_max_replication(spa));
 	ASSERT3U(zio->io_size, ==, BP_GET_PSIZE(bp));
 
+	/*
+	 * The dump device does not support gang blocks so allocation on
+	 * behalf of the dump device (i.e. ZIO_FLAG_NODATA) must avoid
+	 * the "fast" gang feature.
+	 */
+	flags |= (zio->io_flags & ZIO_FLAG_NODATA) ? METASLAB_GANG_AVOID : 0;
+	flags |= (zio->io_flags & ZIO_FLAG_GANG_CHILD) ?
+	    METASLAB_GANG_CHILD : 0;
 	error = metaslab_alloc(spa, mc, zio->io_size, bp,
-	    zio->io_prop.zp_copies, zio->io_txg, NULL, 0);
+	    zio->io_prop.zp_copies, zio->io_txg, NULL, flags);
 
 	if (error) {
+		spa_dbgmsg(spa, "%s: metaslab allocation failure: zio %p, "
+		    "size %llu, error %d", spa_name(spa), zio, zio->io_size,
+		    error);
 		if (error == ENOSPC && zio->io_size > SPA_MINBLOCKSIZE)
 			return (zio_write_gang_block(zio));
 		zio->io_error = error;
@@ -2908,9 +3004,11 @@ zio_done(zio_t *zio)
 			 * Reexecution is potentially a huge amount of work.
 			 * Hand it off to the otherwise-unused claim taskq.
 			 */
-			(void) taskq_dispatch(
+			ASSERT(taskq_empty_ent(&zio->io_tqent));
+			(void) taskq_dispatch_ent(
 			    zio->io_spa->spa_zio_taskq[ZIO_TYPE_CLAIM][ZIO_TASKQ_ISSUE],
-			    (task_func_t *)zio_reexecute, zio, TQ_SLEEP);
+			    (task_func_t *)zio_reexecute, zio, 0,
+			    &zio->io_tqent);
 		}
 		return (ZIO_PIPELINE_STOP);
 	}
@@ -3006,5 +3104,8 @@ module_param(zio_bulk_flags, int, 0644);
 MODULE_PARM_DESC(zio_bulk_flags, "Additional flags to pass to bulk buffers");
 
 module_param(zio_delay_max, int, 0644);
-MODULE_PARM_DESC(zio_delay_max, "Max zio delay before posting an event (ms)");
+MODULE_PARM_DESC(zio_delay_max, "Max zio millisec delay before posting event");
+
+module_param(zio_requeue_io_start_cut_in_line, int, 0644);
+MODULE_PARM_DESC(zio_requeue_io_start_cut_in_line, "Prioritize requeued I/O");
 #endif

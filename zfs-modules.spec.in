@@ -22,6 +22,28 @@
 %define kobj %{require_kobj}
 %endif
 
+# Set using 'rpmbuild ... --with debug ...', defaults to disabled.
+%if %{defined _with_debug}
+ %define kdebug --enable-debug
+%else
+ %if %{defined _without_debug}
+  %define kdebug --disable-debug
+ %else
+  %define kdebug --disable-debug
+ %endif
+%endif
+
+# Set using 'rpmbuild ... --with debug-dmu-tx ...', defaults to disabled.
+%if %{defined _with_debug_dmu_tx}
+ %define kdebug_dmu_tx --enable-debug-dmu-tx
+%else
+ %if %{defined _without_debug_dmu_tx}
+  %define kdebug_dmu_tx --disable-debug-dmu-tx
+ %else
+  %define kdebug_dmu_tx --disable-debug-dmu-tx
+ %endif
+%endif
+
 # SLES:
 %if %{defined suse_version}
  %if %{undefined kver}
@@ -198,13 +220,15 @@
 %define krequires        %{kpkg}
 %endif
 %define splrequires      %{splpkg}
+%define spldevrequires   %{spldevpkg}
 %else
 %define relext           %(echo %{kverpkg} | %{__sed} -e 's/-/_/g')
 %define release          @ZFS_META_RELEASE@_%{relext}
 %if %{defined kpkg}
 %define krequires        %{kpkg} %{koppkg} %{kverpkg}
 %endif
-%define splrequires      %{splpkg} = %{splverpkg}
+%define splrequires      %{splpkg} = %{splverpkg}_%{relext}
+%define spldevrequires   %{spldevpkg} = %{splverpkg}_%{relext}
 %endif
 
 Summary:         ZFS File System
@@ -212,8 +236,8 @@ Group:           Utilities/System
 Name:            %{name}
 Version:         %{version}
 Release:         %{release}
-License:         @LICENSE@
-URL:             git://eris.llnl.gov/zfs.git
+License:         @ZFS_META_LICENSE@
+URL:             git://github.com/zfsonlinux/zfs.git
 BuildRoot:       %{_tmppath}/%{name}-%{version}-%{release}-%(%{__id} -un)
 Source:          @PACKAGE@-%{version}.tar.gz
 %if %{defined krequires}
@@ -224,6 +248,7 @@ BuildRequires:   %{kdevpkg}
 %endif
 Requires:        %{splrequires}
 BuildRequires:   %{spldevpkg}
+Provides:        lustre-backend-fs
 
 %description
 The %{name} package contains kernel modules and support utilities for
@@ -235,11 +260,10 @@ Group:           Development/Libraries
 %if %{defined krequires}
 Requires:        %{krequires}
 %endif
-Requires:        %{splrequires}
 %if %{defined kdevpkg}
-BuildRequires:   %{kdevpkg}
+Requires:        %{kdevpkg}
 %endif
-BuildRequires:   %{spldevpkg}
+Requires:        %{spldevrequires}
 
 %description devel
 The %{name}-devel package contains the kernel header files and 
@@ -251,7 +275,7 @@ which use %{name}.
 %build
 %configure --with-linux=%{kdir} --with-linux-obj=%{kobj} \
            --with-spl=%{spldir} --with-spl-obj=%{splobj} \
-           --with-config=kernel
+           --with-config=kernel %{kdebug} %{kdebug_dmu_tx}
 make
 
 %install
@@ -271,14 +295,14 @@ rm -rf $RPM_BUILD_ROOT
 
 %post
 if [ -f /boot/System.map-%{kver} ]; then
-	depmod -ae -F /boot/System.map-%{kver} %{kver} || exit 0
+	/sbin/depmod -ae -F /boot/System.map-%{kver} %{kver} || exit 0
 else
-	depmod -ae %{kver} || exit 0
+	/sbin/depmod -a || exit 0
 fi
 
 %postun
 if [ -f /boot/System.map-%{kver} ]; then
-	depmod -ae -F /boot/System.map-%{kver} %{kver} || exit 0
+	/sbin/depmod -ae -F /boot/System.map-%{kver} %{kver} || exit 0
 else
-	depmod -ae %{kver} || exit 0
+	/sbin/depmod -a || exit 0
 fi

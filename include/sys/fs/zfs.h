@@ -21,6 +21,7 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011 by Delphix. All rights reserved.
  */
 
 /* Portions Copyright 2010 Robert Milkowski */
@@ -122,6 +123,7 @@ typedef enum {
 	ZFS_PROP_DEDUP,
 	ZFS_PROP_MLSLABEL,
 	ZFS_PROP_SYNC,
+	ZFS_PROP_REFRATIO,
 	ZFS_NUM_PROPS
 } zfs_prop_t;
 
@@ -161,6 +163,7 @@ typedef enum {
 	ZPOOL_PROP_FREE,
 	ZPOOL_PROP_ALLOCATED,
 	ZPOOL_PROP_READONLY,
+	ZPOOL_PROP_ASHIFT,
 	ZPOOL_NUM_PROPS
 } zpool_prop_t;
 
@@ -306,6 +309,11 @@ typedef enum {
 	ZFS_SYNC_DISABLED = 2
 } zfs_sync_type_t;
 
+typedef enum {
+	ZFS_XATTR_OFF = 0,
+	ZFS_XATTR_DIR = 1,
+	ZFS_XATTR_SA = 2
+} zfs_xattr_type_t;
 
 /*
  * On-disk version number.

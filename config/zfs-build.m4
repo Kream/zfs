@@ -20,17 +20,48 @@ AC_DEFUN([ZFS_AC_DEBUG], [
 		HOSTCFLAGS="${HOSTCFLAGS} -DDEBUG -Werror"
 		DEBUG_CFLAGS="-DDEBUG -Werror"
 		DEBUG_STACKFLAGS="-fstack-check"
+		DEBUG_ZFS="_with_debug"
+		AC_DEFINE(ZFS_DEBUG, 1, [zfs debugging enabled])
 	],
 	[
 		KERNELCPPFLAGS="${KERNELCPPFLAGS} -DNDEBUG "
 		HOSTCFLAGS="${HOSTCFLAGS} -DNDEBUG "
 		DEBUG_CFLAGS="-DNDEBUG"
 		DEBUG_STACKFLAGS=""
+		DEBUG_ZFS="_without_debug"
 	])
 
 	AC_SUBST(DEBUG_CFLAGS)
 	AC_SUBST(DEBUG_STACKFLAGS)
+	AC_SUBST(DEBUG_ZFS)
 	AC_MSG_RESULT([$enable_debug])
+])
+
+AC_DEFUN([ZFS_AC_DEBUG_DMU_TX], [
+	AC_ARG_ENABLE([debug-dmu-tx],
+		[AS_HELP_STRING([--enable-debug-dmu-tx],
+		[Enable dmu tx validation @<:@default=no@:>@])],
+		[],
+		[enable_debug_dmu_tx=no])
+
+	AS_IF([test "x$enable_debug_dmu_tx" = xyes],
+	[
+		KERNELCPPFLAGS="${KERNELCPPFLAGS} -DDEBUG_DMU_TX"
+		DEBUG_DMU_TX="_with_debug_dmu_tx"
+		AC_DEFINE([DEBUG_DMU_TX], [1],
+		[Define to 1 to enabled dmu tx validation])
+	],
+	[
+		DEBUG_DMU_TX="_without_debug_dmu_tx"
+	])
+
+	AC_SUBST(DEBUG_DMU_TX)
+	AC_MSG_CHECKING([whether dmu tx validation is enabled])
+	AC_MSG_RESULT([$enable_debug_dmu_tx])
+])
+
+AC_DEFUN([ZFS_AC_CONFIG_ALWAYS], [
+	ZFS_AC_CONFIG_ALWAYS_NO_UNUSED_BUT_SET_VARIABLE
 ])
 
 AC_DEFUN([ZFS_AC_CONFIG], [
@@ -46,6 +77,8 @@ AC_DEFUN([ZFS_AC_CONFIG], [
 	AC_MSG_CHECKING([zfs config])
 	AC_MSG_RESULT([$ZFS_CONFIG]);
 	AC_SUBST(ZFS_CONFIG)
+
+	ZFS_AC_CONFIG_ALWAYS
 
 	case "$ZFS_CONFIG" in
 		kernel) ZFS_AC_CONFIG_KERNEL ;;
@@ -169,25 +202,73 @@ AC_DEFUN([ZFS_AC_ALIEN], [
 ])
 
 dnl #
+dnl # Check for pacman+makepkg to build Arch Linux packages.  If these
+dnl # tools are missing it is non-fatal but you will not be able to
+dnl # build Arch Linux packages and will be warned if you try too.
+dnl #
+AC_DEFUN([ZFS_AC_PACMAN], [
+	PACMAN=pacman
+	MAKEPKG=makepkg
+
+	AC_MSG_CHECKING([whether $PACMAN is available])
+	tmp=$($PACMAN --version 2>/dev/null)
+	AS_IF([test -n "$tmp"], [
+		PACMAN_VERSION=$(echo $tmp |
+		                 $AWK '/Pacman/ { print $[3] }' |
+		                 $SED 's/^v//')
+		HAVE_PACMAN=yes
+		AC_MSG_RESULT([$HAVE_PACMAN ($PACMAN_VERSION)])
+	],[
+		HAVE_PACMAN=no
+		AC_MSG_RESULT([$HAVE_PACMAN])
+	])
+
+	AC_MSG_CHECKING([whether $MAKEPKG is available])
+	tmp=$($MAKEPKG --version 2>/dev/null)
+	AS_IF([test -n "$tmp"], [
+		MAKEPKG_VERSION=$(echo $tmp | $AWK '/makepkg/ { print $[3] }')
+		HAVE_MAKEPKG=yes
+		AC_MSG_RESULT([$HAVE_MAKEPKG ($MAKEPKG_VERSION)])
+	],[
+		HAVE_MAKEPKG=no
+		AC_MSG_RESULT([$HAVE_MAKEPKG])
+	])
+
+	AC_SUBST(HAVE_PACMAN)
+	AC_SUBST(PACMAN)
+	AC_SUBST(PACMAN_VERSION)
+
+	AC_SUBST(HAVE_MAKEPKG)
+	AC_SUBST(MAKEPKG)
+	AC_SUBST(MAKEPKG_VERSION)
+])
+
+dnl #
 dnl # Using the VENDOR tag from config.guess set the default
 dnl # package type for 'make pkg': (rpm | deb | tgz)
 dnl #
 AC_DEFUN([ZFS_AC_DEFAULT_PACKAGE], [
 	AC_MSG_CHECKING([linux distribution])
-	if test -f /etc/redhat-release ; then
-		VENDOR=redhat ;
+	if test -f /etc/toss-release ; then
+		VENDOR=toss ;
 	elif test -f /etc/fedora-release ; then
 		VENDOR=fedora ;
-	elif test -f /etc/lsb-release ; then
-		VENDOR=ubuntu ;
-	elif test -f /etc/debian_version ; then
-		VENDOR=debian ;
+	elif test -f /etc/redhat-release ; then
+		VENDOR=redhat ;
+	elif test -f /etc/gentoo-release ; then
+		VENDOR=gentoo ;
+	elif test -f /etc/arch-release ; then
+		VENDOR=arch ;
 	elif test -f /etc/SuSE-release ; then
 		VENDOR=sles ;
 	elif test -f /etc/slackware-version ; then
 		VENDOR=slackware ;
-	elif test -f /etc/gentoo-release ; then
-		VENDOR=gentoo ;
+	elif test -f /etc/lunar.release ; then
+		VENDOR=lunar ;
+	elif test -f /etc/lsb-release ; then
+		VENDOR=ubuntu ;
+	elif test -f /etc/debian_version ; then
+		VENDOR=debian ;
 	else
 		VENDOR= ;
 	fi
@@ -196,27 +277,44 @@ AC_DEFUN([ZFS_AC_DEFAULT_PACKAGE], [
 
 	AC_MSG_CHECKING([default package type])
 	case "$VENDOR" in
-		fedora)     DEFAULT_PACKAGE=rpm ;;
-		redhat)     DEFAULT_PACKAGE=rpm ;;
-		sles)       DEFAULT_PACKAGE=rpm ;;
-		ubuntu)     DEFAULT_PACKAGE=deb ;;
-		debian)     DEFAULT_PACKAGE=deb ;;
-		slackware)  DEFAULT_PACKAGE=tgz ;;
-		*)          DEFAULT_PACKAGE=rpm ;;
+		toss)       DEFAULT_PACKAGE=rpm  ;;
+		redhat)     DEFAULT_PACKAGE=rpm  ;;
+		fedora)     DEFAULT_PACKAGE=rpm  ;;
+		gentoo)     DEFAULT_PACKAGE=tgz  ;;
+		arch)       DEFAULT_PACKAGE=arch ;;
+		sles)       DEFAULT_PACKAGE=rpm  ;;
+		slackware)  DEFAULT_PACKAGE=tgz  ;;
+		lunar)      DEFAULT_PACKAGE=tgz  ;;
+		ubuntu)     DEFAULT_PACKAGE=deb  ;;
+		debian)     DEFAULT_PACKAGE=deb  ;;
+		*)          DEFAULT_PACKAGE=rpm  ;;
 	esac
 
 	AC_MSG_RESULT([$DEFAULT_PACKAGE])
 	AC_SUBST(DEFAULT_PACKAGE)
 
+	AC_MSG_CHECKING([default init directory])
+	case "$VENDOR" in
+		arch)       DEFAULT_INIT_DIR=$sysconfdir/rc.d ;;
+		*)          DEFAULT_INIT_DIR=$sysconfdir/init.d ;;
+	esac
+
+	AC_MSG_RESULT([$DEFAULT_INIT_DIR])
+	AC_SUBST(DEFAULT_INIT_DIR)
+
 	AC_MSG_CHECKING([default init script type])
 	case "$VENDOR" in
+		toss)       DEFAULT_INIT_SCRIPT=redhat ;;
+		redhat)     DEFAULT_INIT_SCRIPT=redhat ;;
 		fedora)     DEFAULT_INIT_SCRIPT=fedora ;;
-		redhat)     DEFAULT_INIT_SCRIPT=fedora ;;
-		sles)       DEFAULT_INIT_SCRIPT=lsb ;;
-		ubuntu)     DEFAULT_INIT_SCRIPT=lsb ;;
-		debian)     DEFAULT_INIT_SCRIPT=lsb ;;
-		slackware)  DEFAULT_INIT_SCRIPT=lsb ;;
-		*)          DEFAULT_INIT_SCRIPT=lsb ;;
+		gentoo)     DEFAULT_INIT_SCRIPT=gentoo ;;
+		arch)       DEFAULT_INIT_SCRIPT=arch   ;;
+		sles)       DEFAULT_INIT_SCRIPT=lsb    ;;
+		slackware)  DEFAULT_INIT_SCRIPT=lsb    ;;
+		lunar)      DEFAULT_INIT_SCRIPT=lunar  ;;
+		ubuntu)     DEFAULT_INIT_SCRIPT=lsb    ;;
+		debian)     DEFAULT_INIT_SCRIPT=lsb    ;;
+		*)          DEFAULT_INIT_SCRIPT=lsb    ;;
 	esac
 
 	AC_MSG_RESULT([$DEFAULT_INIT_SCRIPT])
@@ -227,8 +325,10 @@ dnl #
 dnl # Default ZFS package configuration
 dnl #
 AC_DEFUN([ZFS_AC_PACKAGE], [
+	ZFS_AC_DEFAULT_PACKAGE
 	ZFS_AC_RPM
 	ZFS_AC_DPKG
 	ZFS_AC_ALIEN
-	ZFS_AC_DEFAULT_PACKAGE
+
+	AS_IF([test "$VENDOR" = "arch"], [ZFS_AC_PACMAN])
 ])
